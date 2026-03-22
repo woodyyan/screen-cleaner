@@ -2,729 +2,173 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>屏幕清洁器 ✨</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>无用但爽 ✨</title>
   <style>
-    /* ── 全局重置 ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       background: #0a0a0f;
-      overflow: hidden;
-      width: 100vw;
-      height: 100vh;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      touch-action: none; /* 阻止移动端默认滚动/缩放 */
-    }
-
-    /* ── 底层：干净/发光的珍珠白背景 ── */
-    #bg-canvas {
-      position: fixed;
-      inset: 0;
-      z-index: 0;
-    }
-
-    /* ── 污渍层：用 destination-out 擦除 ── */
-    #dirt-canvas {
-      position: fixed;
-      inset: 0;
-      z-index: 1;
-      cursor: crosshair;
-    }
-
-    /* ── 粒子/完成动画层 ── */
-    #fx-canvas {
-      position: fixed;
-      inset: 0;
-      z-index: 2;
-      pointer-events: none;
-    }
-
-    /* ── 进度条容器（右上角） ── */
-    #progress-wrap {
-      position: fixed;
-      top: 16px;
-      right: 16px;
-      z-index: 10;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      background: rgba(0,0,0,0.45);
-      border-radius: 20px;
-      padding: 6px 12px;
-      backdrop-filter: blur(6px);
-      box-shadow: 0 2px 12px rgba(0,0,0,0.5);
-      min-width: 140px;
-    }
-
-    #progress-bar-bg {
-      flex: 1;
-      height: 6px;
-      background: rgba(255,255,255,0.15);
-      border-radius: 3px;
-      overflow: hidden;
-    }
-
-    #progress-bar-fill {
-      height: 100%;
-      width: 0%;
-      border-radius: 3px;
-      background: #e74c3c; /* 起始红色，JS 动态更新 */
-      transition: background 0.3s;
-    }
-
-    #progress-label {
-      font-size: 12px;
-      color: #fff;
-      font-weight: 600;
-      min-width: 34px;
-      text-align: right;
-    }
-
-    /* ── 提示文字（初始状态） ── */
-    #hint {
-      position: fixed;
-      bottom: 32px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 10;
-      color: rgba(255,255,255,0.45);
-      font-size: 14px;
-      letter-spacing: 0.05em;
-      pointer-events: none;
-      transition: opacity 0.5s;
-    }
-
-    /* ── 完成大字 ── */
-    #complete-text {
-      position: fixed;
-      inset: 0;
-      z-index: 20;
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      pointer-events: none;
-      opacity: 0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #fff;
+      overflow: hidden;
     }
 
-    #complete-text h1 {
-      font-size: clamp(3rem, 12vw, 8rem);
-      font-weight: 900;
-      color: #fff;
-      text-shadow: 0 0 40px rgba(255,220,50,0.9), 0 0 80px rgba(255,200,0,0.6);
+    /* 背景粒子 */
+    #bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+
+    .content {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 2rem;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 6vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #fff 0%, #a78bfa 50%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      font-size: clamp(0.9rem, 2.5vw, 1.1rem);
+      color: rgba(255,255,255,0.4);
+      margin-bottom: 3rem;
       letter-spacing: 0.05em;
     }
 
-    #complete-text p {
-      margin-top: 12px;
-      font-size: clamp(1rem, 3vw, 1.5rem);
-      color: rgba(255,255,255,0.75);
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1.5rem;
+      max-width: 700px;
+      width: 100%;
+    }
+
+    .card {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 20px;
+      padding: 2rem;
+      text-decoration: none;
+      color: #fff;
+      transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+      cursor: pointer;
+      display: block;
+    }
+
+    .card:hover {
+      transform: translateY(-6px) scale(1.02);
+      background: rgba(255,255,255,0.09);
+      border-color: rgba(255,255,255,0.25);
+    }
+
+    .card-emoji {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      display: block;
+    }
+
+    .card-title {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+    }
+
+    .card-desc {
+      font-size: 0.9rem;
+      color: rgba(255,255,255,0.5);
+      line-height: 1.5;
+    }
+
+    .card.cleaner { border-color: rgba(167,139,250,0.3); }
+    .card.cleaner:hover { border-color: rgba(167,139,250,0.6); box-shadow: 0 0 30px rgba(167,139,250,0.15); }
+
+    .card.bubble { border-color: rgba(56,189,248,0.3); }
+    .card.bubble:hover { border-color: rgba(56,189,248,0.6); box-shadow: 0 0 30px rgba(56,189,248,0.15); }
+
+    .footer {
+      position: fixed;
+      bottom: 1.5rem;
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.2);
+      z-index: 1;
     }
   </style>
 </head>
 <body>
+  <canvas id="bg"></canvas>
 
-<!-- 三层 Canvas -->
-<canvas id="bg-canvas"></canvas>
-<canvas id="dirt-canvas"></canvas>
-<canvas id="fx-canvas"></canvas>
+  <div class="content">
+    <h1>无用但爽 ✨</h1>
+    <p class="subtitle">没什么用，但停不下来</p>
 
-<!-- 进度条 -->
-<div id="progress-wrap">
-  <div id="progress-bar-bg">
-    <div id="progress-bar-fill"></div>
+    <div class="grid">
+      <a href="screen-cleaner.html" class="card cleaner">
+        <span class="card-emoji">🧽</span>
+        <div class="card-title">屏幕清洁器</div>
+        <div class="card-desc">擦去所有污渍，还原完美屏幕。强迫症的终极治愈。</div>
+      </a>
+      <a href="bubble-pop.html" class="card bubble">
+        <span class="card-emoji">🫧</span>
+        <div class="card-title">消除泡泡</div>
+        <div class="card-desc">点击泡泡，享受消除的快感。连击触发 FEVER 模式。</div>
+      </a>
+    </div>
   </div>
-  <span id="progress-label">0%</span>
-</div>
 
-<!-- 操作提示 -->
-<div id="hint">拖动擦拭屏幕 👆</div>
+  <p class="footer">更多玩法即将到来</p>
 
-<!-- 完成文字 -->
-<div id="complete-text">
-  <h1>完美✨</h1>
-  <p>屏幕已焕然一新！</p>
-</div>
+  <script>
+    // 背景漂浮粒子
+    const canvas = document.getElementById('bg');
+    const ctx = canvas.getContext('2d');
+    let W, H, particles = [];
 
-<!-- GSAP CDN -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
-
-<script>
-/* ================================================================
-   屏幕清洁器 - 核心逻辑
-   层次结构：
-     bg-canvas   → 珍珠白发光底层（静态，用 radial gradient 绘制）
-     dirt-canvas → 污渍层（destination-out 擦除）
-     fx-canvas   → 粒子特效层（完成动画）
-   ================================================================ */
-
-(function () {
-  'use strict';
-
-  // ── 常量 ──────────────────────────────────────────────
-  const DIRT_COUNT       = 280;   // 污渍数量
-  const WIPE_RADIUS_PC   = 40;    // 桌面擦拭半径(px)
-  const WIPE_RADIUS_MB   = 60;    // 移动端擦拭半径(px)
-  const COMPLETE_THRESH  = 97;    // 达到此百分比触发完成（留一点余量避免float误差）
-  const RESET_DELAY      = 3000;  // 完成后多少毫秒自动重置
-  const SAMPLE_PIXELS    = 4;     // 进度采样时每隔几像素取一个点（越小越精准但越慢）
-
-  // ── DOM 引用 ─────────────────────────────────────────
-  const bgCanvas    = document.getElementById('bg-canvas');
-  const dirtCanvas  = document.getElementById('dirt-canvas');
-  const fxCanvas    = document.getElementById('fx-canvas');
-  const bgCtx       = bgCanvas.getContext('2d');
-  const dirtCtx     = dirtCanvas.getContext('2d');
-  const fxCtx       = fxCanvas.getContext('2d');
-
-  const fillEl      = document.getElementById('progress-bar-fill');
-  const labelEl     = document.getElementById('progress-label');
-  const hintEl      = document.getElementById('hint');
-  const completeEl  = document.getElementById('complete-text');
-
-  // ── 状态 ─────────────────────────────────────────────
-  let W, H;                      // 画布宽高
-  let isPointerDown  = false;
-  let lastX = 0, lastY = 0;
-  let wipeRadius     = WIPE_RADIUS_PC;
-  let dirtPixelCount = 0;        // 污渍层不透明像素总数（初始化时计算）
-  let completed      = false;
-  let particles      = [];       // 完成粒子数组
-  let fxAnimId       = null;
-
-  // ── 是否移动端 ───────────────────────────────────────
-  const isMobile = /Android|iPhone|iPad|iPod|Touch/i.test(navigator.userAgent)
-    || ('ontouchstart' in window);
-  if (isMobile) wipeRadius = WIPE_RADIUS_MB;
-
-  // ── Web Audio ─────────────────────────────────────────
-  let audioCtx  = null;
-  let scrubOsc  = null;  // 擦拭锯齿波振荡器
-  let scrubGain = null;  // 音量节点
-  let scrubFilter = null; // 低通滤波，让声音更柔和
-
-  function ensureAudioCtx() {
-    if (audioCtx) return;
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-
-  /** 开始擦拭音效 */
-  function startScrubSound() {
-    ensureAudioCtx();
-    if (scrubOsc) return; // 已在播放
-    scrubOsc    = audioCtx.createOscillator();
-    scrubGain   = audioCtx.createGain();
-    scrubFilter = audioCtx.createBiquadFilter();
-
-    scrubOsc.type            = 'sawtooth';
-    scrubOsc.frequency.value = 100;
-    scrubFilter.type         = 'lowpass';
-    scrubFilter.frequency.value = 800; // 截止频率，让声音更柔和
-
-    scrubGain.gain.value = 0;
-
-    scrubOsc.connect(scrubFilter);
-    scrubFilter.connect(scrubGain);
-    scrubGain.connect(audioCtx.destination);
-    scrubOsc.start();
-
-    // 渐入
-    scrubGain.gain.setTargetAtTime(0.08, audioCtx.currentTime, 0.05);
-  }
-
-  /** 根据速度调整音效参数 */
-  function updateScrubSound(speed) {
-    if (!scrubOsc) return;
-    // speed: 0 ~ 200(px/frame)，映射到 80~200Hz
-    const freq = 80 + Math.min(speed, 200) * 0.6;
-    scrubOsc.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.02);
-    // 音量随速度变化
-    const vol = Math.min(0.15, 0.04 + speed * 0.0005);
-    scrubGain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.02);
-  }
-
-  /** 停止擦拭音效（淡出） */
-  function stopScrubSound() {
-    if (!scrubGain || !scrubOsc) return;
-    scrubGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
-    const osc = scrubOsc;
-    setTimeout(() => { try { osc.stop(); } catch(e){} }, 400);
-    scrubOsc  = null;
-    scrubGain = null;
-  }
-
-  /** 播放完成音阶（do re mi fa sol la si do） */
-  function playCompleteScale() {
-    ensureAudioCtx();
-    const notes = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25];
-    notes.forEach((freq, i) => {
-      const osc  = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.value = 0;
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-
-      const start = audioCtx.currentTime + i * 0.18;
-      osc.start(start);
-      gain.gain.setTargetAtTime(0.25, start, 0.01);
-      gain.gain.setTargetAtTime(0,    start + 0.25, 0.05);
-      osc.stop(start + 0.5);
-    });
-  }
-
-  // ── 画布尺寸同步 ─────────────────────────────────────
-  function resize() {
-    W = window.innerWidth;
-    H = window.innerHeight;
-    [bgCanvas, dirtCanvas, fxCanvas].forEach(c => {
-      c.width  = W;
-      c.height = H;
-    });
-    drawBackground();
-    drawDirt();
-  }
-
-  // ── 绘制背景（珍珠白/发光底层） ───────────────────────
-  function drawBackground() {
-    // 基底：非常深的黑蓝
-    bgCtx.fillStyle = '#0a0a0f';
-    bgCtx.fillRect(0, 0, W, H);
-
-    // 发光的珍珠白区域（中心偏亮，用多层 radial gradient 叠加）
-    const grad = bgCtx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.7);
-    grad.addColorStop(0,   'rgba(255, 252, 245, 1)');   // 中心：温暖的珍珠白
-    grad.addColorStop(0.4, 'rgba(240, 238, 230, 0.97)');
-    grad.addColorStop(0.7, 'rgba(220, 218, 210, 0.92)');
-    grad.addColorStop(1,   'rgba(180, 178, 172, 0.85)');
-    bgCtx.fillStyle = grad;
-    bgCtx.fillRect(0, 0, W, H);
-
-    // 额外的光晕点缀（几个小亮斑，模拟屏幕反光）
-    const glows = [
-      { x: W * 0.25, y: H * 0.3, r: 120, alpha: 0.12 },
-      { x: W * 0.75, y: H * 0.6, r: 90,  alpha: 0.10 },
-      { x: W * 0.5,  y: H * 0.5, r: 200, alpha: 0.08 },
-    ];
-    glows.forEach(g => {
-      const g2 = bgCtx.createRadialGradient(g.x, g.y, 0, g.x, g.y, g.r);
-      g2.addColorStop(0,   `rgba(255,255,255,${g.alpha})`);
-      g2.addColorStop(1,   'rgba(255,255,255,0)');
-      bgCtx.fillStyle = g2;
-      bgCtx.fillRect(0, 0, W, H);
-    });
-  }
-
-  // ── 污渍数据（重置时重新生成） ──────────────────────
-  let dirtSpots = [];
-
-  function generateDirt() {
-    dirtSpots = [];
-    for (let i = 0; i < DIRT_COUNT; i++) {
-      const type = Math.random() < 0.6 ? 'blob' : 'fingerprint';
-      dirtSpots.push({
-        type,
-        x:      Math.random() * W,
-        y:      Math.random() * H,
-        rx:     20 + Math.random() * 60,   // 椭圆 x 半径
-        ry:     15 + Math.random() * 45,   // 椭圆 y 半径
-        angle:  Math.random() * Math.PI,
-        // 污渍颜色：棕褐色/灰色，带随机透明度
-        hue:    Math.random() < 0.5 ? 30 + Math.random() * 20 : 0,  // 0=灰, 30~50=棕褐
-        sat:    Math.random() < 0.5 ? `${10 + Math.random()*20}%` : '0%',
-        lum:    `${10 + Math.random() * 25}%`,
-        alpha:  0.35 + Math.random() * 0.45,
-        blur:   8  + Math.random() * 20,
-        scale:  0,  // 动画起始（浮现动画用）
-      });
+    function resize() {
+      W = canvas.width = window.innerWidth;
+      H = canvas.height = window.innerHeight;
     }
-  }
+    resize();
+    window.addEventListener('resize', resize);
 
-  /** 绘制单个污渍 */
-  function drawSpot(ctx, spot, alpha) {
-    ctx.save();
-    ctx.translate(spot.x, spot.y);
-    ctx.rotate(spot.angle);
-    ctx.scale(spot.rx, spot.ry);
-
-    const sat = spot.hue > 0 ? spot.sat : '0%';
-    const color = `hsla(${spot.hue}, ${sat}, ${spot.lum}, ${alpha})`;
-
-    if (spot.type === 'blob') {
-      // 圆形污渍（放射渐变）
-      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
-      g.addColorStop(0,   color);
-      g.addColorStop(0.6, color);
-      g.addColorStop(1,   'rgba(0,0,0,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(0, 0, 1, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      // 指纹型：多条弧线
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 0.04;
-      for (let j = 0; j < 5; j++) {
-        const r = 0.3 + j * 0.12;
-        ctx.beginPath();
-        ctx.arc(0, 0, r, -Math.PI * 0.6, Math.PI * 0.6);
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
-  }
-
-  /** 全量绘制污渍层（重置或初始化时调用） */
-  function drawDirt() {
-    dirtCtx.clearRect(0, 0, W, H);
-    // 先填充一层半透明黑色作为"灰尘底色"
-    dirtCtx.fillStyle = 'rgba(5, 5, 10, 0.7)';
-    dirtCtx.fillRect(0, 0, W, H);
-
-    dirtSpots.forEach(spot => {
-      dirtCtx.filter = `blur(${spot.blur}px)`;
-      drawSpot(dirtCtx, spot, spot.alpha * spot.scale);
-    });
-    dirtCtx.filter = 'none';
-
-    // 记录"满脏"时的不透明像素数（用于计算进度）
-    computeInitialDirtCount();
-  }
-
-  /** 计算初始污渍像素数（异步，避免卡顿） */
-  function computeInitialDirtCount() {
-    // 用低分辨率采样加速
-    const data = dirtCtx.getImageData(0, 0, W, H).data;
-    let count = 0;
-    for (let i = 3; i < data.length; i += 4 * SAMPLE_PIXELS) {
-      if (data[i] > 20) count++; // alpha > 20 认为是脏的
-    }
-    dirtPixelCount = count;
-  }
-
-  // ── 计算清洁进度 ─────────────────────────────────────
-  function calcProgress() {
-    if (dirtPixelCount === 0) return 100;
-    const data = dirtCtx.getImageData(0, 0, W, H).data;
-    let remaining = 0;
-    for (let i = 3; i < data.length; i += 4 * SAMPLE_PIXELS) {
-      if (data[i] > 20) remaining++;
-    }
-    const pct = Math.round((1 - remaining / dirtPixelCount) * 100);
-    return Math.min(100, Math.max(0, pct));
-  }
-
-  /** 更新进度条 UI */
-  function updateProgressUI(pct) {
-    fillEl.style.width = pct + '%';
-    labelEl.textContent = pct + '%';
-    // 颜色：红→黄→绿
-    if (pct < 50) {
-      const r = 231, g = Math.round(76 + (pct / 50) * (192 - 76)), b = 60;
-      fillEl.style.background = `rgb(${r},${g},${b})`;
-    } else {
-      const r = Math.round(231 - ((pct - 50) / 50) * (231 - 46)), g = 213, b = 60;
-      fillEl.style.background = `rgb(${r},${g},${b})`;
-    }
-  }
-
-  // ── 擦拭逻辑 ─────────────────────────────────────────
-  /** 在 (cx, cy) 处擦除一圆形区域 */
-  function wipeAt(cx, cy) {
-    dirtCtx.save();
-    dirtCtx.globalCompositeOperation = 'destination-out';
-    const grad = dirtCtx.createRadialGradient(cx, cy, 0, cx, cy, wipeRadius);
-    grad.addColorStop(0,   'rgba(0,0,0,1)');   // 中心完全擦除
-    grad.addColorStop(0.6, 'rgba(0,0,0,0.8)');
-    grad.addColorStop(1,   'rgba(0,0,0,0)');   // 边缘羽化
-    dirtCtx.fillStyle = grad;
-    dirtCtx.beginPath();
-    dirtCtx.arc(cx, cy, wipeRadius, 0, Math.PI * 2);
-    dirtCtx.fill();
-    dirtCtx.restore();
-  }
-
-  // 进度更新节流（每 8 帧更新一次，避免 getImageData 频繁调用影响性能）
-  let progressThrottleCount = 0;
-
-  function onMove(cx, cy) {
-    if (!isPointerDown || completed) return;
-
-    // 计算速度
-    const dx = cx - lastX, dy = cy - lastY;
-    const speed = Math.sqrt(dx * dx + dy * dy);
-    lastX = cx; lastY = cy;
-
-    wipeAt(cx, cy);
-    updateScrubSound(speed);
-
-    // 隐藏提示
-    if (hintEl.style.opacity !== '0') {
-      hintEl.style.opacity = '0';
-    }
-
-    // 节流计算进度
-    progressThrottleCount++;
-    if (progressThrottleCount % 8 === 0) {
-      const pct = calcProgress();
-      updateProgressUI(pct);
-      if (pct >= COMPLETE_THRESH && !completed) {
-        triggerComplete();
-      }
-    }
-  }
-
-  // ── 完成动画 ─────────────────────────────────────────
-  function triggerComplete() {
-    completed = true;
-    stopScrubSound();
-    playCompleteScale();
-
-    // 强制进度条到100%
-    updateProgressUI(100);
-
-    // 1. 全屏白光爆闪
-    const flashEl = document.createElement('div');
-    flashEl.style.cssText = `
-      position:fixed;inset:0;z-index:30;
-      background:#fff;pointer-events:none;opacity:0;
-    `;
-    document.body.appendChild(flashEl);
-    gsap.timeline()
-      .to(flashEl,   { opacity: 1, duration: 0.12 })
-      .to(flashEl,   { opacity: 0, duration: 0.4,  ease: 'power2.out' })
-      .to(flashEl,   { opacity: 0.5, duration: 0.08 }, '+=0.05')
-      .to(flashEl,   { opacity: 0, duration: 0.5,  ease: 'power2.out',
-                       onComplete: () => flashEl.remove() });
-
-    // 2. 粒子雨
-    spawnParticles();
-    if (fxAnimId) cancelAnimationFrame(fxAnimId);
-    fxAnimId = requestAnimationFrame(animateParticles);
-
-    // 3. 大字出现
-    gsap.fromTo(completeEl,
-      { opacity: 0, scale: 0.5 },
-      { opacity: 1, scale: 1, duration: 0.6, ease: 'back.out(1.7)',
-        delay: 0.2
-      }
-    );
-    // 文字抖动特效
-    gsap.to(completeEl.querySelector('h1'), {
-      scale: 1.05, repeat: 5, yoyo: true, duration: 0.15, ease: 'power1.inOut', delay: 0.8
-    });
-
-    // 4. 3秒后重置
-    setTimeout(reset, RESET_DELAY);
-  }
-
-  // ── 粒子系统 ─────────────────────────────────────────
-  function spawnParticles() {
-    particles = [];
-    const count = isMobile ? 120 : 200;
-    for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = 2 + Math.random() * 8;
+    for (let i = 0; i < 60; i++) {
       particles.push({
-        x:    W / 2,
-        y:    H / 2,
-        vx:   Math.cos(angle) * speed,
-        vy:   Math.sin(angle) * speed - Math.random() * 4, // 略向上偏
-        r:    2 + Math.random() * 5,
-        life: 1,
-        decay: 0.008 + Math.random() * 0.015,
-        // 颜色：金色/白色/淡黄
-        hue:  Math.random() < 0.6 ? 45 + Math.random() * 20 : 60,
-        sat:  Math.random() < 0.6 ? '90%' : '0%',
-        lum:  '70%',
+        x: Math.random() * window.innerWidth,
+        y: Math.random() * window.innerHeight,
+        r: Math.random() * 1.5 + 0.5,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: (Math.random() - 0.5) * 0.3,
+        alpha: Math.random() * 0.4 + 0.1
       });
     }
-  }
 
-  function animateParticles() {
-    fxCtx.clearRect(0, 0, W, H);
-    particles = particles.filter(p => p.life > 0);
-
-    particles.forEach(p => {
-      p.x  += p.vx;
-      p.y  += p.vy;
-      p.vy += 0.15;   // 重力
-      p.life -= p.decay;
-
-      fxCtx.save();
-      fxCtx.globalAlpha = Math.max(0, p.life);
-      fxCtx.fillStyle = `hsl(${p.hue}, ${p.sat}, ${p.lum})`;
-      fxCtx.shadowColor = `hsl(${p.hue}, ${p.sat}, 80%)`;
-      fxCtx.shadowBlur  = 6;
-      fxCtx.beginPath();
-      fxCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      fxCtx.fill();
-      fxCtx.restore();
-    });
-
-    if (particles.length > 0) {
-      fxAnimId = requestAnimationFrame(animateParticles);
-    } else {
-      fxCtx.clearRect(0, 0, W, H);
-    }
-  }
-
-  // ── 重置 ─────────────────────────────────────────────
-  function reset() {
-    completed = false;
-    particles = [];
-    fxCtx.clearRect(0, 0, W, H);
-
-    // 淡出大字
-    gsap.to(completeEl, { opacity: 0, scale: 0.8, duration: 0.4,
-      onComplete: () => {
-        gsap.set(completeEl, { scale: 1 });
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${p.alpha})`;
+        ctx.fill();
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0) p.x = W;
+        if (p.x > W) p.x = 0;
+        if (p.y < 0) p.y = H;
+        if (p.y > H) p.y = 0;
       }
-    });
-
-    // 重新生成污渍，并播放"浮现"动画
-    generateDirt();
-    drawDirt(); // 先静默绘制（scale=0 所以看不到）
-    updateProgressUI(0);
-    hintEl.style.opacity = '1';
-
-    // 动画：污渍一个个浮现（stagger）
-    dirtSpots.forEach((spot, i) => {
-      gsap.to(spot, {
-        scale: 1,
-        duration: 0.4 + Math.random() * 0.4,
-        delay: i * 0.005 + Math.random() * 0.1,
-        ease: 'back.out(1.5)',
-        onUpdate: () => {
-          // 每帧重绘（批量重绘，防止过多单独 RAF）
-        },
-        onComplete: () => {
-          // 全部完成后统一重绘一次
-          if (i === dirtSpots.length - 1) drawDirt();
-        }
-      });
-    });
-
-    // 用一个统一的 RAF 循环来驱动浮现期间的重绘
-    let animStart = performance.now();
-    const introTime = 2000; // ms，和 GSAP stagger 总时长大致匹配
-    function introLoop(now) {
-      if (now - animStart < introTime) {
-        drawDirtInstant();
-        requestAnimationFrame(introLoop);
-      } else {
-        drawDirt(); // 最终完整绘制
-      }
+      requestAnimationFrame(draw);
     }
-    requestAnimationFrame(introLoop);
-  }
-
-  /** 瞬时绘制当前 scale 状态的污渍（不重新计算 dirtPixelCount） */
-  function drawDirtInstant() {
-    dirtCtx.clearRect(0, 0, W, H);
-    dirtCtx.fillStyle = 'rgba(5, 5, 10, 0.7)';
-    dirtCtx.fillRect(0, 0, W, H);
-    dirtSpots.forEach(spot => {
-      if (spot.scale < 0.01) return;
-      dirtCtx.filter = `blur(${spot.blur}px)`;
-      drawSpot(dirtCtx, spot, spot.alpha * spot.scale);
-    });
-    dirtCtx.filter = 'none';
-  }
-
-  // ── 事件绑定 ─────────────────────────────────────────
-
-  // 鼠标事件
-  dirtCanvas.addEventListener('mousedown', e => {
-    if (completed) return;
-    isPointerDown = true;
-    lastX = e.clientX; lastY = e.clientY;
-    startScrubSound();
-    wipeAt(e.clientX, e.clientY);
-  });
-
-  window.addEventListener('mousemove', e => {
-    onMove(e.clientX, e.clientY);
-  });
-
-  window.addEventListener('mouseup', () => {
-    if (!isPointerDown) return;
-    isPointerDown = false;
-    stopScrubSound();
-    // 最终更新一次进度
-    const pct = calcProgress();
-    updateProgressUI(pct);
-    if (pct >= COMPLETE_THRESH && !completed) triggerComplete();
-  });
-
-  // 触摸事件
-  dirtCanvas.addEventListener('touchstart', e => {
-    e.preventDefault();
-    if (completed) return;
-    isPointerDown = true;
-    const t = e.touches[0];
-    lastX = t.clientX; lastY = t.clientY;
-    startScrubSound();
-    wipeAt(t.clientX, t.clientY);
-  }, { passive: false });
-
-  window.addEventListener('touchmove', e => {
-    e.preventDefault();
-    const t = e.touches[0];
-    onMove(t.clientX, t.clientY);
-  }, { passive: false });
-
-  window.addEventListener('touchend', () => {
-    if (!isPointerDown) return;
-    isPointerDown = false;
-    stopScrubSound();
-    const pct = calcProgress();
-    updateProgressUI(pct);
-    if (pct >= COMPLETE_THRESH && !completed) triggerComplete();
-  });
-
-  // 窗口缩放
-  window.addEventListener('resize', () => {
-    resize();
-    generateDirt();
-    drawDirt();
-    updateProgressUI(0);
-  });
-
-  // ── 初始化 ───────────────────────────────────────────
-  function init() {
-    resize();
-    generateDirt();
-
-    // 污渍浮现动画：scale 从 0 → 1，stagger
-    let animStart = performance.now();
-    const introTime = 1800;
-
-    dirtSpots.forEach((spot, i) => {
-      gsap.fromTo(spot, { scale: 0 }, {
-        scale: 1,
-        duration: 0.35 + Math.random() * 0.3,
-        delay:    0.05 + i * 0.004 + Math.random() * 0.12,
-        ease: 'back.out(1.4)',
-      });
-    });
-
-    function introLoop(now) {
-      if (now - animStart < introTime + 400) {
-        drawDirtInstant();
-        requestAnimationFrame(introLoop);
-      } else {
-        drawDirt(); // 浮现完成后计算基准像素数
-      }
-    }
-    requestAnimationFrame(introLoop);
-  }
-
-  init();
-
-})();
-</script>
+    draw();
+  </script>
 </body>
 </html>

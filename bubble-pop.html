@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>消除泡泡 · Bubble Pop</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      overflow: hidden;
+      background: #0a0a0f;
+      font-family: 'Segoe UI', 'PingFang SC', sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* 主画布 */
+    #gameCanvas {
+      display: block;
+      position: fixed;
+      top: 0; left: 0;
+    }
+
+    /* 右上角 HUD */
+    #hud {
+      position: fixed;
+      top: 16px; right: 20px;
+      text-align: right;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #hud .count {
+      font-size: 28px;
+      font-weight: 700;
+      color: #fff;
+      text-shadow: 0 0 12px rgba(120,200,255,0.8);
+      line-height: 1;
+    }
+    #hud .label {
+      font-size: 11px;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    #hud .combo-wrap {
+      margin-top: 4px;
+      transition: opacity 0.3s;
+    }
+    #hud .combo-wrap.hidden { opacity: 0; }
+    #hud .combo-num {
+      font-size: 22px;
+      font-weight: 800;
+      color: #ffd700;
+      text-shadow: 0 0 16px rgba(255,200,0,0.9);
+    }
+
+    /* FEVER 字样 */
+    #feverBanner {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%) scale(0);
+      font-size: 72px;
+      font-weight: 900;
+      letter-spacing: 8px;
+      background: linear-gradient(90deg, #ff4e8c, #ff9900, #ffe04e, #4effb3, #4ec3ff, #cf4eff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      filter: drop-shadow(0 0 24px rgba(255,120,200,0.9));
+      pointer-events: none;
+      z-index: 20;
+      opacity: 0;
+    }
+
+    /* 屏幕边框发光（FEVER） */
+    #feverGlow {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 5;
+      opacity: 0;
+      box-shadow:
+        inset 0 0 60px 20px rgba(255,80,180,0.55),
+        inset 0 0 120px 40px rgba(80,200,255,0.3);
+      transition: opacity 0.5s;
+    }
+    #feverGlow.active { opacity: 1; }
+
+    /* 底部提示 */
+    #hint {
+      position: fixed;
+      bottom: 14px; left: 0; right: 0;
+      text-align: center;
+      font-size: 13px;
+      color: rgba(255,255,255,0.28);
+      pointer-events: none;
+      letter-spacing: 1px;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<!-- FEVER 边框发光 -->
+<div id="feverGlow"></div>
+
+<!-- 右上角 HUD -->
+<div id="hud">
+  <div class="label">已消除</div>
+  <div class="count" id="scoreDisplay">0</div>
+  <div class="combo-wrap hidden" id="comboWrap">
+    <div class="label">连击</div>
+    <div class="combo-num" id="comboDisplay">0</div>
+  </div>
+</div>
+
+<!-- FEVER 大字 -->
+<div id="feverBanner">FEVER!</div>
+
+<!-- 底部提示 -->
+<div id="hint">点击泡泡，享受消除的快感</div>
+
+<!-- GSAP -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+
+<script>
+// ─────────────────────────────────────────────
+//  工具函数
+// ─────────────────────────────────────────────
+const rand   = (min, max) => Math.random() * (max - min) + min;
+const randInt = (min, max) => Math.floor(rand(min, max + 1));
+const clamp  = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ─────────────────────────────────────────────
+//  Canvas 初始化
+// ─────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─────────────────────────────────────────────
+//  Web Audio API 音效合成
+// ─────────────────────────────────────────────
+let audioCtx = null;
+
+/** 懒初始化 AudioContext（iOS 需要在手势内创建） */
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+/**
+ * 普通爆裂音：正弦波 + 快速衰减
+ * @param {number} freq 基础频率 (Hz)
+ */
+function playPop(freq) {
+  const ac = getAudioCtx();
+  const osc  = ac.createOscillator();
+  const gain = ac.createGain();
+
+  osc.type      = 'sine';
+  osc.frequency.setValueAtTime(freq, ac.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(freq * 0.4, ac.currentTime + 0.12);
+
+  gain.gain.setValueAtTime(0.55, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.18);
+
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(ac.currentTime);
+  osc.stop(ac.currentTime + 0.22);
+}
+
+/**
+ * Combo 奖励音阶：do-re-mi 递增
+ * @param {number} step 连击次数（从1起）
+ */
+const SCALE_FREQS = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25, 587.33, 659.25];
+function playCombo(step) {
+  const ac   = getAudioCtx();
+  const freq  = SCALE_FREQS[(step - 1) % SCALE_FREQS.length] * (Math.floor((step - 1) / SCALE_FREQS.length) + 1);
+  const osc  = ac.createOscillator();
+  const gain = ac.createGain();
+
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(freq, ac.currentTime);
+  osc.frequency.linearRampToValueAtTime(freq * 1.05, ac.currentTime + 0.08);
+
+  gain.gain.setValueAtTime(0.4, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.25);
+
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(ac.currentTime);
+  osc.stop(ac.currentTime + 0.28);
+}
+
+/**
+ * FEVER 触发音：上扬电子扫频音效
+ */
+function playFever() {
+  const ac = getAudioCtx();
+  const t  = ac.currentTime;
+
+  // 扫频 osc
+  const osc1 = ac.createOscillator();
+  const osc2 = ac.createOscillator();
+  const gain = ac.createGain();
+
+  osc1.type = 'sawtooth';
+  osc1.frequency.setValueAtTime(200, t);
+  osc1.frequency.exponentialRampToValueAtTime(1200, t + 0.7);
+
+  osc2.type = 'square';
+  osc2.frequency.setValueAtTime(400, t);
+  osc2.frequency.exponentialRampToValueAtTime(2400, t + 0.7);
+
+  gain.gain.setValueAtTime(0.0, t);
+  gain.gain.linearRampToValueAtTime(0.35, t + 0.05);
+  gain.gain.setValueAtTime(0.35, t + 0.55);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+
+  osc1.connect(gain);
+  osc2.connect(gain);
+  gain.connect(ac.destination);
+
+  osc1.start(t); osc1.stop(t + 0.95);
+  osc2.start(t); osc2.stop(t + 0.95);
+}
+
+// ─────────────────────────────────────────────
+//  游戏状态
+// ─────────────────────────────────────────────
+let score      = 0;      // 已消除数
+let combo      = 0;      // 连击数
+let comboTimer = null;   // 连击超时定时器
+let isFever    = false;  // FEVER 模式
+let startTime  = Date.now();
+
+const bubbles  = [];     // 活跃泡泡
+const particles = [];    // 爆裂粒子
+const rings    = [];     // 扩散光环
+const floatTexts = [];   // 浮动连击文字
+
+// ─────────────────────────────────────────────
+//  泡泡类
+// ─────────────────────────────────────────────
+class Bubble {
+  constructor() {
+    this.reset(true);
+  }
+
+  reset(init = false) {
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // 半径：FEVER 时更大
+    this.baseRadius = rand(20, 80);
+    this.radius     = this.baseRadius;
+
+    // 从底部或左右边缘随机生成
+    const side = Math.random();
+    if (side < 0.7) {
+      // 70% 从底部
+      this.x = rand(this.radius, W - this.radius);
+      this.y = init ? rand(H * 0.1, H * 0.9) : H + this.radius;
+    } else if (side < 0.85) {
+      // 左侧
+      this.x = -this.radius;
+      this.y = rand(H * 0.3, H);
+    } else {
+      // 右侧
+      this.x = W + this.radius;
+      this.y = rand(H * 0.3, H);
+    }
+
+    // 速度：向上漂浮 + 轻微横向偏移
+    this.vx = rand(-0.6, 0.6);
+    this.vy = rand(-1.5, -0.4);
+
+    // 颜色（随机色相，高饱和）
+    this.hue  = rand(0, 360);
+    this.sat  = rand(70, 100);
+    this.lit  = rand(55, 75);
+    this.alpha = rand(0.55, 0.82);
+
+    // 微摇摆
+    this.wobbleOffset = rand(0, Math.PI * 2);
+    this.wobbleSpeed  = rand(0.02, 0.05);
+    this.wobbleAmp    = rand(0.3, 0.8);
+
+    // 淡入
+    this.fadeAlpha = 0;
+    this.alive     = true;
+    this.fadingOut = false;
+    this.fadeOutProgress = 0;
+  }
+
+  /** 泡泡颜色字符串 */
+  get color() {
+    return `hsla(${this.hue},${this.sat}%,${this.lit}%,${this.alpha * (isFever ? 1.15 : 1)})`;
+  }
+
+  update(dt, t) {
+    if (!this.alive) return;
+
+    // 淡入
+    if (this.fadeAlpha < 1) this.fadeAlpha = Math.min(1, this.fadeAlpha + dt * 1.5);
+
+    // FEVER 放大效果
+    const targetR = this.baseRadius * (isFever ? 1.25 : 1);
+    this.radius += (targetR - this.radius) * 0.05;
+
+    // 微摇摆（横向正弦）
+    this.x += this.vx + Math.sin(t * this.wobbleSpeed + this.wobbleOffset) * this.wobbleAmp;
+    this.y += this.vy;
+
+    // 淡出（到达顶部）
+    if (this.y < -this.radius * 0.5) {
+      this.fadingOut = true;
+    }
+    if (this.fadingOut) {
+      this.fadeAlpha -= dt * 2;
+      if (this.fadeAlpha <= 0) this.alive = false;
+    }
+  }
+
+  draw(ctx) {
+    if (!this.alive) return;
+    ctx.save();
+    ctx.globalAlpha = clamp(this.fadeAlpha, 0, 1);
+
+    const x = this.x, y = this.y, r = this.radius;
+
+    // 主体渐变（从中心偏左上到右下，半透明彩色）
+    const grad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.05, x, y, r);
+    grad.addColorStop(0,   `hsla(${this.hue},${this.sat}%,${clamp(this.lit + 20, 0, 100)}%,${this.alpha * 0.6})`);
+    grad.addColorStop(0.6, this.color);
+    grad.addColorStop(1,   `hsla(${this.hue},${this.sat}%,${clamp(this.lit - 20, 0, 100)}%,${this.alpha * 0.9})`);
+
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // 边缘描边
+    ctx.strokeStyle = `rgba(255,255,255,${0.3 * this.fadeAlpha})`;
+    ctx.lineWidth   = 1.5;
+    ctx.stroke();
+
+    // 高光（左上白色弧形光斑）
+    const hlGrad = ctx.createRadialGradient(
+      x - r * 0.38, y - r * 0.38, 0,
+      x - r * 0.38, y - r * 0.38, r * 0.52
+    );
+    hlGrad.addColorStop(0,   `rgba(255,255,255,0.62)`);
+    hlGrad.addColorStop(0.5, `rgba(255,255,255,0.14)`);
+    hlGrad.addColorStop(1,   `rgba(255,255,255,0)`);
+
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.arc(x - r * 0.38, y - r * 0.38, r * 0.52, 0, Math.PI * 2);
+    ctx.fillStyle = hlGrad;
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /** 判断点 (px,py) 是否在泡泡内 */
+  contains(px, py) {
+    return Math.hypot(px - this.x, py - this.y) <= this.radius;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  爆裂粒子
+// ─────────────────────────────────────────────
+class Particle {
+  constructor(x, y, hue, sat, lit) {
+    const angle = rand(0, Math.PI * 2);
+    const speed = rand(3, 9);
+    this.x    = x;
+    this.y    = y;
+    this.vx   = Math.cos(angle) * speed;
+    this.vy   = Math.sin(angle) * speed;
+    this.r    = rand(3, 9);
+    this.hue  = hue + rand(-20, 20);
+    this.sat  = sat;
+    this.lit  = lit;
+    this.life = 1;   // 0→dead
+    this.decay = rand(0.035, 0.065);
+    // 尾迹历史
+    this.trail = [];
+  }
+
+  update() {
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > 6) this.trail.shift();
+
+    this.x  += this.vx;
+    this.y  += this.vy;
+    this.vy += 0.18; // 重力
+    this.vx *= 0.96;
+    this.life -= this.decay;
+  }
+
+  draw(ctx) {
+    if (this.life <= 0) return;
+
+    // 尾迹
+    if (this.trail.length > 1) {
+      ctx.save();
+      for (let i = 1; i < this.trail.length; i++) {
+        const t0 = this.trail[i - 1];
+        const t1 = this.trail[i];
+        const prog = i / this.trail.length;
+        ctx.beginPath();
+        ctx.moveTo(t0.x, t0.y);
+        ctx.lineTo(t1.x, t1.y);
+        ctx.strokeStyle = `hsla(${this.hue},${this.sat}%,${this.lit}%,${this.life * prog * 0.6})`;
+        ctx.lineWidth   = this.r * prog * 0.7;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // 粒子本体
+    ctx.save();
+    ctx.globalAlpha = this.life;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r * this.life, 0, Math.PI * 2);
+    ctx.fillStyle = `hsl(${this.hue},${this.sat}%,${this.lit}%)`;
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  扩散光环
+// ─────────────────────────────────────────────
+class Ring {
+  constructor(x, y, hue, fever) {
+    this.x     = x;
+    this.y     = y;
+    this.hue   = hue;
+    this.r     = fever ? 0 : 0;
+    this.maxR  = fever ? 180 : 110;
+    this.life  = 1;
+    this.fever = fever;
+  }
+
+  update() {
+    this.r    += (this.maxR - this.r) * 0.12;
+    this.life -= 0.03;
+  }
+
+  draw(ctx) {
+    if (this.life <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = this.life * 0.65;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsl(${this.hue}, 90%, 70%)`;
+    ctx.lineWidth   = this.fever ? 4 : 2.5;
+    ctx.stroke();
+    // 外圈
+    if (this.fever) {
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r * 0.7, 0, Math.PI * 2);
+      ctx.strokeStyle = `hsl(${(this.hue + 40) % 360}, 90%, 80%)`;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = this.life * 0.4;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  浮动文字（combo 显示）
+// ─────────────────────────────────────────────
+class FloatText {
+  constructor(x, y, text, size, color) {
+    this.x     = x;
+    this.y     = y;
+    this.vy    = -2.5;
+    this.text  = text;
+    this.size  = size;
+    this.color = color;
+    this.life  = 1;
+    this.decay = 0.022;
+    this.scale = 0;  // GSAP 来做 scale 弹入
+    // 用 GSAP 做弹入动画
+    gsap.from(this, { scale: 0, duration: 0.22, ease: 'back.out(2)' });
+  }
+
+  update() {
+    this.y    += this.vy;
+    this.vy   *= 0.95;
+    this.life -= this.decay;
+    if (this.scale < 1) this.scale = Math.min(1, this.scale + 0.12);
+  }
+
+  draw(ctx) {
+    if (this.life <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = clamp(this.life, 0, 1);
+    ctx.font        = `900 ${this.size * this.scale}px 'Segoe UI', sans-serif`;
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle   = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur  = 18;
+    ctx.fillText(this.text, this.x, this.y);
+    ctx.restore();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  泡泡生成
+// ─────────────────────────────────────────────
+let lastSpawnTime = 0;
+
+/** 根据游戏时长计算生成间隔（ms） */
+function getSpawnInterval() {
+  const elapsed = (Date.now() - startTime) / 1000; // 秒
+  // 前 30 秒：1200ms → 之后逐渐压缩到 350ms
+  const t = Math.min(elapsed, 120);
+  return Math.max(350, 1200 - (1200 - 350) * (t / 120));
+}
+
+function maybeSpawnBubble(now) {
+  if (now - lastSpawnTime < getSpawnInterval()) return;
+  lastSpawnTime = now;
+  bubbles.push(new Bubble());
+}
+
+// 初始预填一些泡泡
+for (let i = 0; i < 12; i++) bubbles.push(new Bubble());
+
+// ─────────────────────────────────────────────
+//  简单圆-圆碰撞物理
+// ─────────────────────────────────────────────
+function resolveCollisions() {
+  for (let i = 0; i < bubbles.length; i++) {
+    for (let j = i + 1; j < bubbles.length; j++) {
+      const a = bubbles[i], b = bubbles[j];
+      if (!a.alive || !b.alive) continue;
+      const dx   = b.x - a.x;
+      const dy   = b.y - a.y;
+      const dist = Math.hypot(dx, dy);
+      const minD = a.radius + b.radius;
+      if (dist < minD && dist > 0.01) {
+        // 分离
+        const overlap = (minD - dist) * 0.5;
+        const nx = dx / dist, ny = dy / dist;
+        a.x -= nx * overlap;
+        a.y -= ny * overlap;
+        b.x += nx * overlap;
+        b.y += ny * overlap;
+        // 弹性碰撞速度交换（简化：只交换法向分量）
+        const dvx = b.vx - a.vx, dvy = b.vy - a.vy;
+        const dot  = dvx * nx + dvy * ny;
+        if (dot < 0) {
+          a.vx += dot * nx * 0.6;
+          a.vy += dot * ny * 0.6;
+          b.vx -= dot * nx * 0.6;
+          b.vy -= dot * ny * 0.6;
+        }
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+//  爆裂泡泡
+// ─────────────────────────────────────────────
+function popBubble(bubble, px, py) {
+  bubble.alive = false;
+
+  const x   = bubble.x, y = bubble.y;
+  const hue = bubble.hue, sat = bubble.sat, lit = bubble.lit;
+  const r   = bubble.radius;
+
+  // 计算爆裂音频率（半径越小音调越高）
+  const freq = 600 - (r - 20) / (80 - 20) * 300;  // 20px→600Hz, 80px→300Hz
+  playPop(freq);
+
+  // 生成粒子（6-8 个，FEVER 时更多）
+  const count = isFever ? randInt(10, 14) : randInt(6, 8);
+  for (let i = 0; i < count; i++) {
+    particles.push(new Particle(x, y, hue, sat, lit));
+  }
+
+  // 扩散光环
+  rings.push(new Ring(x, y, hue, isFever));
+
+  // 分数 +1
+  score++;
+  document.getElementById('scoreDisplay').textContent = score;
+
+  // 连击处理
+  updateCombo(x, y);
+}
+
+function updateCombo(x, y) {
+  combo++;
+  playCombo(combo);
+
+  // 重置连击超时
+  if (comboTimer) clearTimeout(comboTimer);
+  comboTimer = setTimeout(() => {
+    combo = 0;
+    document.getElementById('comboWrap').classList.add('hidden');
+    // 退出 FEVER
+    if (isFever) exitFever();
+  }, 500);
+
+  // 更新 HUD
+  if (combo >= 2) {
+    document.getElementById('comboDisplay').textContent = `×${combo}`;
+    document.getElementById('comboWrap').classList.remove('hidden');
+  }
+
+  // 浮动连击文字
+  if (combo >= 2) {
+    const text  = combo >= 10 ? `FEVER×${combo}` : `×${combo}`;
+    const size  = clamp(28 + combo * 4, 28, 72);
+    const color = combo >= 10 ? '#ff4ecc' : '#ffd700';
+    floatTexts.push(new FloatText(x, y - 20, text, size, color));
+  }
+
+  // FEVER 触发
+  if (combo === 10 && !isFever) {
+    enterFever();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  FEVER 模式
+// ─────────────────────────────────────────────
+function enterFever() {
+  isFever = true;
+  playFever();
+
+  // 发光边框
+  document.getElementById('feverGlow').classList.add('active');
+
+  // 大字动画
+  const banner = document.getElementById('feverBanner');
+  banner.style.opacity = '1';
+  gsap.fromTo(banner,
+    { scale: 0, rotation: -8 },
+    {
+      scale: 1.1, rotation: 4,
+      duration: 0.45, ease: 'back.out(1.8)',
+      onComplete: () => {
+        gsap.to(banner, {
+          scale: 0.9, opacity: 0, duration: 0.7, delay: 0.5, ease: 'power2.in',
+          onComplete: () => { banner.style.transform = 'translate(-50%,-50%) scale(0)'; }
+        });
+      }
+    }
+  );
+}
+
+function exitFever() {
+  isFever = false;
+  document.getElementById('feverGlow').classList.remove('active');
+}
+
+// ─────────────────────────────────────────────
+//  点击 / 触摸处理
+// ─────────────────────────────────────────────
+function handlePointer(px, py) {
+  // 从最上层（最后渲染）往回找，命中最小的优先
+  let hit = null;
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    if (b.alive && !b.fadingOut && b.contains(px, py)) {
+      if (!hit || b.radius < hit.radius) hit = b;
+    }
+  }
+  if (hit) popBubble(hit, px, py);
+}
+
+canvas.addEventListener('click', e => {
+  handlePointer(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    handlePointer(touch.clientX, touch.clientY);
+  }
+}, { passive: false });
+
+// ─────────────────────────────────────────────
+//  背景渐变绘制
+// ─────────────────────────────────────────────
+let bgGrad = null;
+
+function drawBackground() {
+  if (!bgGrad || bgGrad._w !== canvas.width || bgGrad._h !== canvas.height) {
+    bgGrad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    bgGrad.addColorStop(0, '#0a0a0f');
+    bgGrad.addColorStop(1, '#0d1a2e');
+    bgGrad._w = canvas.width;
+    bgGrad._h = canvas.height;
+  }
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // FEVER 时背景微微发光
+  if (isFever) {
+    const glow = ctx.createRadialGradient(
+      canvas.width / 2, canvas.height / 2, 0,
+      canvas.width / 2, canvas.height / 2, Math.max(canvas.width, canvas.height) * 0.8
+    );
+    glow.addColorStop(0, 'rgba(80,0,60,0.0)');
+    glow.addColorStop(1, 'rgba(80,0,60,0.18)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  主循环
+// ─────────────────────────────────────────────
+let lastTime = performance.now();
+
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000 * 60, 5); // 帧差，归一到60fps
+  lastTime = now;
+
+  // ── 背景 ──
+  drawBackground();
+
+  // ── 更新 & 删除死亡对象 ──
+  maybeSpawnBubble(now);
+
+  // 碰撞（每帧，但泡泡少时很快）
+  resolveCollisions();
+
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    bubbles[i].update(dt, now * 0.001);
+    if (!bubbles[i].alive) bubbles.splice(i, 1);
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update();
+    if (particles[i].life <= 0) particles.splice(i, 1);
+  }
+
+  for (let i = rings.length - 1; i >= 0; i--) {
+    rings[i].update();
+    if (rings[i].life <= 0) rings.splice(i, 1);
+  }
+
+  for (let i = floatTexts.length - 1; i >= 0; i--) {
+    floatTexts[i].update();
+    if (floatTexts[i].life <= 0) floatTexts.splice(i, 1);
+  }
+
+  // ── 绘制（层次：泡泡 → 粒子 → 光环 → 浮动文字）──
+  for (const b of bubbles) b.draw(ctx);
+  for (const p of particles) p.draw(ctx);
+  for (const r of rings) r.draw(ctx);
+  for (const ft of floatTexts) ft.draw(ctx);
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
