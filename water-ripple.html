@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>水波纹</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #000;
+      overflow: hidden;
+      cursor: none;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    /* 底部提示文字 */
+    #hint {
+      position: fixed;
+      bottom: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(100, 180, 220, 0.45);
+      font-size: 13px;
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      letter-spacing: 2px;
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    /* 右上角平静度 */
+    #calm-indicator {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      color: rgba(100, 200, 230, 0.6);
+      font-size: 13px;
+      font-family: 'PingFang SC', 'Microsoft YaHei', monospace;
+      pointer-events: none;
+      user-select: none;
+      text-shadow: 0 0 8px rgba(0, 180, 255, 0.4);
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div id="hint">点击激起涟漪 · 按住划水 · 双击大浪</div>
+<div id="calm-indicator">平静度 100%</div>
+
+<script>
+// ============================================================
+//  水波纹模拟 - 基于二维波动方程差分法
+//  核心原理：每个格点的下一时刻高度 = 相邻格点平均*2 - 上一时刻高度，再乘衰减系数
+// ============================================================
+
+(function() {
+  'use strict';
+
+  // ---------- 获取 DOM 元素 ----------
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const calmEl = document.getElementById('calm-indicator');
+
+  // ---------- 配置参数 ----------
+  const SCALE = 3;           // 降采样倍数（模拟网格 = 屏幕尺寸 / SCALE）
+  const DAMPING = 0.99;      // 波动衰减系数（越接近1衰减越慢）
+  const WAVE_SPEED = 0.5;    // 波速系数（影响差分传播速度，0.5 是稳定上限）
+
+  // 颜色定义（深蓝/深青水面基调）
+  const COLOR_DEEP   = [0,   26,  46];   // #001a2e 深处
+  const COLOR_MID    = [0,   58,  92];   // #003a5c 中间基色
+  const COLOR_BRIGHT = [80, 200, 240];   // 高光蓝白色
+  const COLOR_WHITE  = [255, 255, 255];  // 波峰白色高光
+
+  // ---------- 画布和模拟网格尺寸 ----------
+  let W = 0, H = 0;   // 屏幕像素尺寸
+  let GW = 0, GH = 0; // 模拟网格尺寸（W/SCALE, H/SCALE）
+
+  // 两个交替缓冲区（Float32Array 存储每点的高度值）
+  let bufCurrent = null;
+  let bufPrevious = null;
+
+  // 用于渲染的 ImageData
+  let imageData = null;
+  let pixels = null; // Uint8ClampedArray，对应 canvas 每像素 RGBA
+
+  // ---------- 鼠标/触摸状态 ----------
+  let mouseX = -1, mouseY = -1;      // 鼠标在屏幕上的坐标
+  let isPointerDown = false;
+  let lastDragX = -1, lastDragY = -1;
+  let lastDragTime = 0;
+  let dragSpeed = 0; // 拖动速度（用于控制划水音量）
+
+  // 双击检测
+  let lastClickTime = 0;
+  let lastClickX = -1, lastClickY = -1;
+  const DBLCLICK_MS = 300;
+
+  // ---------- Web Audio API ----------
+  let audioCtx = null;
+  let ambientNode = null;   // 环境白噪声节点
+  let ambientGain = null;
+  let dragGain = null;      // 划水噪声增益
+
+  // 懒初始化 AudioContext（需要用户交互后才能创建）
+  function initAudio() {
+    if (audioCtx) return;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      setupAmbientSound();
+    } catch(e) {
+      console.warn('Web Audio API 不可用', e);
+    }
+  }
+
+  // 创建环境底噪（极低音量白噪声）
+  function setupAmbientSound() {
+    if (!audioCtx) return;
+
+    // 白噪声缓冲区（2秒循环）
+    const bufferSize = audioCtx.sampleRate * 2;
+    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1);
+    }
+
+    const noiseSource = audioCtx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+
+    // 低通滤波，让白噪声更像水面低频环境音
+    const lpf = audioCtx.createBiquadFilter();
+    lpf.type = 'lowpass';
+    lpf.frequency.value = 400;
+
+    ambientGain = audioCtx.createGain();
+    ambientGain.gain.value = 0.018; // 极低音量
+
+    noiseSource.connect(lpf);
+    lpf.connect(ambientGain);
+    ambientGain.connect(audioCtx.destination);
+    noiseSource.start();
+
+    // 划水噪声（带通，动态音量）
+    const dragNoise = audioCtx.createBufferSource();
+    dragNoise.buffer = noiseBuffer;
+    dragNoise.loop = true;
+
+    const bpf = audioCtx.createBiquadFilter();
+    bpf.type = 'bandpass';
+    bpf.frequency.value = 200;
+    bpf.Q.value = 1.5;
+
+    dragGain = audioCtx.createGain();
+    dragGain.gain.value = 0;
+
+    dragNoise.connect(bpf);
+    bpf.connect(dragGain);
+    dragGain.connect(audioCtx.destination);
+    dragNoise.start();
+  }
+
+  // 播放点击"扑通"声
+  function playClick(strong) {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+
+    // 低频正弦波短促衰减
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(strong ? 80 : 140, now);
+    osc.frequency.exponentialRampToValueAtTime(strong ? 40 : 60, now + 0.15);
+
+    gainNode.gain.setValueAtTime(strong ? 0.5 : 0.25, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, now + (strong ? 0.25 : 0.12));
+
+    osc.connect(gainNode);
+
+    if (strong) {
+      // 双击大浪：添加混响效果（用延迟模拟）
+      const delay = audioCtx.createDelay(0.5);
+      delay.delayTime.value = 0.08;
+      const delayGain = audioCtx.createGain();
+      delayGain.gain.value = 0.3;
+
+      gainNode.connect(delay);
+      delay.connect(delayGain);
+      delayGain.connect(audioCtx.destination);
+
+      // 低频噪声冲击（"哗"的质感）
+      const noiseOsc = audioCtx.createOscillator();
+      noiseOsc.type = 'sawtooth';
+      noiseOsc.frequency.value = 60;
+      const noiseGain = audioCtx.createGain();
+      noiseGain.gain.setValueAtTime(0.2, now);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+      noiseOsc.connect(noiseGain);
+      noiseGain.connect(audioCtx.destination);
+      noiseOsc.start(now);
+      noiseOsc.stop(now + 0.3);
+    }
+
+    gainNode.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + (strong ? 0.25 : 0.15));
+  }
+
+  // 更新划水音量
+  function updateDragSound(speed) {
+    if (!dragGain || !audioCtx) return;
+    const targetVolume = Math.min(speed * 0.004, 0.12);
+    dragGain.gain.setTargetAtTime(targetVolume, audioCtx.currentTime, 0.05);
+  }
+
+  // 停止划水音
+  function stopDragSound() {
+    if (!dragGain || !audioCtx) return;
+    dragGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+  }
+
+  // ---------- 初始化 ----------
+  function init() {
+    resize();
+    window.addEventListener('resize', resize);
+
+    // 鼠标事件
+    canvas.addEventListener('mousemove', onMouseMove);
+    canvas.addEventListener('mousedown', onMouseDown);
+    canvas.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('mouseleave', onMouseLeave);
+    canvas.addEventListener('dblclick', onDblClick);
+
+    // 触摸事件
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd);
+
+    // 1秒后自动激起几个随机涟漪作为演示
+    setTimeout(autoDemo, 1000);
+
+    // 启动主循环
+    requestAnimationFrame(loop);
+  }
+
+  // 调整画布尺寸
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W;
+    canvas.height = H;
+
+    GW = Math.ceil(W / SCALE);
+    GH = Math.ceil(H / SCALE);
+
+    // 重新分配缓冲区
+    bufCurrent  = new Float32Array(GW * GH);
+    bufPrevious = new Float32Array(GW * GH);
+
+    // 重新分配 ImageData
+    imageData = ctx.createImageData(W, H);
+    pixels = imageData.data;
+
+    // 预填充基础水面颜色
+    for (let i = 0; i < W * H; i++) {
+      pixels[i * 4 + 0] = COLOR_MID[0];
+      pixels[i * 4 + 1] = COLOR_MID[1];
+      pixels[i * 4 + 2] = COLOR_MID[2];
+      pixels[i * 4 + 3] = 255;
+    }
+  }
+
+  // 自动演示：激起几个随机涟漪
+  function autoDemo() {
+    const count = 4 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < count; i++) {
+      setTimeout(() => {
+        const x = W * (0.15 + Math.random() * 0.7);
+        const y = H * (0.2 + Math.random() * 0.6);
+        const radius = 20 + Math.random() * 30;
+        const strength = 150 + Math.random() * 200;
+        disturb(x, y, radius, strength);
+      }, i * 250);
+    }
+  }
+
+  // ---------- 波动扰动：在坐标(sx,sy)处以半径r施加高度strength ----------
+  function disturb(sx, sy, radius, strength) {
+    // 将屏幕坐标转换为网格坐标
+    const gx = Math.floor(sx / SCALE);
+    const gy = Math.floor(sy / SCALE);
+    const gr = Math.ceil(radius / SCALE);
+
+    const r2 = gr * gr;
+    for (let dy = -gr; dy <= gr; dy++) {
+      for (let dx = -gr; dx <= gr; dx++) {
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r2) continue;
+        const nx = gx + dx;
+        const ny = gy + dy;
+        if (nx < 0 || nx >= GW || ny < 0 || ny >= GH) continue;
+        // 高斯衰减
+        const factor = Math.exp(-d2 / (r2 * 0.4));
+        bufCurrent[ny * GW + nx] += strength * factor;
+      }
+    }
+  }
+
+  // ---------- 波动方程更新（核心差分迭代）----------
+  // 公式：next[i] = (2*curr[i] - prev[i]) + c^2 * (拉普拉斯算子) * damping
+  // 简化后：next[i] = (curr[left]+curr[right]+curr[up]+curr[down])/2 - prev[i]) * damping
+  // 这是标准的二维波动方程有限差分法
+  function updateWave() {
+    const newBuf = bufPrevious; // 复用旧缓冲区存储下一帧
+    const c2 = WAVE_SPEED * WAVE_SPEED * 4; // 波速平方×4（差分系数）
+
+    for (let y = 1; y < GH - 1; y++) {
+      for (let x = 1; x < GW - 1; x++) {
+        const idx = y * GW + x;
+
+        // 四邻域
+        const l = bufCurrent[idx - 1];
+        const r = bufCurrent[idx + 1];
+        const u = bufCurrent[idx - GW];
+        const d = bufCurrent[idx + GW];
+        const c = bufCurrent[idx];
+        const p = bufPrevious[idx];
+
+        // 二维波动方程差分：
+        // next = (邻居总和 * c^2/4 * 2 - prev + curr*2*(1-c^2)) * damping
+        // 简化到 c^2=0.5 时稳定的经典形式：
+        // next = ((l+r+u+d) / 2 - p) * damping
+        newBuf[idx] = ((l + r + u + d) * WAVE_SPEED - p) * DAMPING;
+      }
+    }
+
+    // 边界条件：吸收边界（值慢慢消失）
+    for (let x = 0; x < GW; x++) {
+      newBuf[x] = newBuf[GW + x] * 0.5;
+      newBuf[(GH - 1) * GW + x] = newBuf[(GH - 2) * GW + x] * 0.5;
+    }
+    for (let y = 0; y < GH; y++) {
+      newBuf[y * GW] = newBuf[y * GW + 1] * 0.5;
+      newBuf[y * GW + GW - 1] = newBuf[y * GW + GW - 2] * 0.5;
+    }
+
+    // 交换缓冲区
+    bufPrevious = bufCurrent;
+    bufCurrent = newBuf;
+  }
+
+  // ---------- 环境微波：模拟静止水面的微小扰动 ----------
+  let ambientTimer = 0;
+  function addAmbientNoise() {
+    ambientTimer++;
+    if (ambientTimer % 6 !== 0) return; // 每6帧添加一次
+
+    // 随机在某点添加极微小扰动
+    if (Math.random() < 0.15) {
+      const gx = 1 + Math.floor(Math.random() * (GW - 2));
+      const gy = 1 + Math.floor(Math.random() * (GH - 2));
+      bufCurrent[gy * GW + gx] += (Math.random() - 0.5) * 3;
+    }
+  }
+
+  // ---------- 渲染：将高度图转换为像素颜色 ----------
+  function render() {
+    // 月光反射带的Y范围（顶部20%区域）
+    const moonY1 = H * 0.05;
+    const moonY2 = H * 0.22;
+    const moonCenterX = W * 0.5;
+    const moonWidth = W * 0.25;
+
+    let totalEnergy = 0; // 用于计算平静度
+
+    for (let gy = 0; gy < GH; gy++) {
+      for (let gx = 0; gx < GW; gx++) {
+        const idx = gy * GW + gx;
+        const h = bufCurrent[idx];
+        totalEnergy += h * h;
+
+        // 计算法线（用相邻高度差近似梯度）
+        const hL = gx > 0 ? bufCurrent[idx - 1] : h;
+        const hR = gx < GW - 1 ? bufCurrent[idx + 1] : h;
+        const hU = gy > 0 ? bufCurrent[idx - GW] : h;
+        const hD = gy < GH - 1 ? bufCurrent[idx + GW] : h;
+
+        // 法向量的 x/y 分量（用于模拟折射偏移）
+        const nx = (hL - hR) * 0.5;
+        const ny = (hU - hD) * 0.5;
+
+        // 高度归一化（限制到 [-1, 1] 范围）
+        const hn = Math.max(-1, Math.min(1, h / 300));
+
+        // 法线强度（用于高光计算）
+        const normalStrength = Math.sqrt(nx * nx + ny * ny) / 100;
+        const specular = Math.max(0, Math.min(1, normalStrength * 2));
+
+        // ---- 颜色混合 ----
+        let r, g, b;
+        if (hn >= 0) {
+          // 波峰：深蓝到亮蓝白
+          const t = hn;
+          const ts = Math.min(1, specular * 3 * t); // 高光系数
+          r = lerp(lerp(COLOR_MID[0], COLOR_BRIGHT[0], t), COLOR_WHITE[0], ts);
+          g = lerp(lerp(COLOR_MID[1], COLOR_BRIGHT[1], t), COLOR_WHITE[1], ts);
+          b = lerp(lerp(COLOR_MID[2], COLOR_BRIGHT[2], t), COLOR_WHITE[2], ts);
+        } else {
+          // 波谷：偏深蓝
+          const t = -hn;
+          r = lerp(COLOR_MID[0], COLOR_DEEP[0], t);
+          g = lerp(COLOR_MID[1], COLOR_DEEP[1], t);
+          b = lerp(COLOR_MID[2], COLOR_DEEP[2], t);
+        }
+
+        // ---- 月光反射叠加 ----
+        // 顶部区域加一条模糊的白色/淡蓝色反射带
+        const sy = gy * SCALE; // 屏幕Y坐标
+        const sx = gx * SCALE; // 屏幕X坐标
+        if (sy > moonY1 && sy < moonY2) {
+          const moonFade = Math.sin(Math.PI * (sy - moonY1) / (moonY2 - moonY1)); // 上下渐隐
+          const moonX = Math.exp(-Math.pow((sx - moonCenterX) / moonWidth, 2));    // 左右渐隐
+          const moonIntensity = moonFade * moonX * 0.18;
+          // 折射偏移影响月光反射形状
+          const rippleFactor = Math.max(0, hn * 0.5 + 0.5);
+          const moonR = moonIntensity * rippleFactor;
+          r = Math.min(255, r + 60 * moonR);
+          g = Math.min(255, g + 80 * moonR);
+          b = Math.min(255, b + 90 * moonR);
+        }
+
+        // ---- 将颜色写入所有对应的屏幕像素（SCALE×SCALE 块） ----
+        const r8 = Math.round(r) | 0;
+        const g8 = Math.round(g) | 0;
+        const b8 = Math.round(b) | 0;
+
+        const yStart = gy * SCALE;
+        const xStart = gx * SCALE;
+        const yEnd = Math.min(yStart + SCALE, H);
+        const xEnd = Math.min(xStart + SCALE, W);
+
+        for (let py = yStart; py < yEnd; py++) {
+          for (let px = xStart; px < xEnd; px++) {
+            const pi = (py * W + px) * 4;
+            pixels[pi]     = r8;
+            pixels[pi + 1] = g8;
+            pixels[pi + 2] = b8;
+            pixels[pi + 3] = 255;
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+
+    // ---- 绘制鼠标发光点 ----
+    if (mouseX >= 0 && mouseY >= 0) {
+      ctx.save();
+      // 外发光
+      const gradient = ctx.createRadialGradient(mouseX, mouseY, 0, mouseX, mouseY, 12);
+      gradient.addColorStop(0, 'rgba(150, 230, 255, 0.7)');
+      gradient.addColorStop(0.3, 'rgba(80, 180, 240, 0.3)');
+      gradient.addColorStop(1, 'rgba(0, 100, 180, 0)');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(mouseX, mouseY, 12, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 中心亮点
+      ctx.fillStyle = 'rgba(220, 245, 255, 0.9)';
+      ctx.beginPath();
+      ctx.arc(mouseX, mouseY, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ---- 更新平静度显示 ----
+    // 平静度 = 1 - clamp(energy/maxEnergy, 0, 1)
+    const energy = Math.sqrt(totalEnergy / (GW * GH));
+    const calm = Math.max(0, Math.min(100, Math.round(100 - energy * 0.3)));
+    calmEl.textContent = `平静度 ${calm}%`;
+  }
+
+  // 线性插值辅助函数
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  // ---------- 事件处理 ----------
+
+  function onMouseMove(e) {
+    const now = Date.now();
+    const prevX = mouseX, prevY = mouseY;
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+
+    if (isPointerDown) {
+      // 计算拖动速度
+      const dx = mouseX - prevX;
+      const dy = mouseY - prevY;
+      dragSpeed = Math.sqrt(dx * dx + dy * dy);
+
+      // 沿轨迹持续产生小扰动
+      if (dragSpeed > 2) {
+        disturb(mouseX, mouseY, 15 + dragSpeed * 0.5, 80 + dragSpeed * 3);
+        updateDragSound(dragSpeed);
+      }
+      lastDragX = mouseX;
+      lastDragY = mouseY;
+      lastDragTime = now;
+    }
+  }
+
+  function onMouseDown(e) {
+    initAudio();
+    isPointerDown = true;
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+    lastDragX = mouseX;
+    lastDragY = mouseY;
+    lastDragTime = Date.now();
+
+    // 检测是否为双击（通过时间和位置判断）
+    const now = Date.now();
+    const dx = mouseX - lastClickX;
+    const dy = mouseY - lastClickY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (now - lastClickTime < DBLCLICK_MS && dist < 40) {
+      // 双击大浪
+      disturb(mouseX, mouseY, 90, 600);
+      playClick(true);
+      lastClickTime = 0; // 重置防止三击
+    } else {
+      // 单击涟漪
+      disturb(mouseX, mouseY, 40, 250);
+      playClick(false);
+      lastClickTime = now;
+      lastClickX = mouseX;
+      lastClickY = mouseY;
+    }
+  }
+
+  function onMouseUp() {
+    isPointerDown = false;
+    stopDragSound();
+    dragSpeed = 0;
+  }
+
+  function onMouseLeave() {
+    mouseX = -1;
+    mouseY = -1;
+    isPointerDown = false;
+    stopDragSound();
+    dragSpeed = 0;
+  }
+
+  // 阻止 dblclick 的默认行为（我们自己处理了）
+  function onDblClick(e) {
+    e.preventDefault();
+  }
+
+  // 触摸事件处理
+  function onTouchStart(e) {
+    e.preventDefault();
+    initAudio();
+    isPointerDown = true;
+
+    const touch = e.touches[0];
+    const now = Date.now();
+    const tx = touch.clientX;
+    const ty = touch.clientY;
+    mouseX = tx;
+    mouseY = ty;
+
+    // 检测双击
+    const dx = tx - lastClickX;
+    const dy = ty - lastClickY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (now - lastClickTime < DBLCLICK_MS && dist < 60) {
+      disturb(tx, ty, 90, 600);
+      playClick(true);
+      lastClickTime = 0;
+    } else {
+      disturb(tx, ty, 40, 250);
+      playClick(false);
+      lastClickTime = now;
+      lastClickX = tx;
+      lastClickY = ty;
+    }
+
+    lastDragX = tx;
+    lastDragY = ty;
+    lastDragTime = now;
+  }
+
+  function onTouchMove(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const prevX = mouseX, prevY = mouseY;
+    mouseX = touch.clientX;
+    mouseY = touch.clientY;
+
+    const dx = mouseX - prevX;
+    const dy = mouseY - prevY;
+    dragSpeed = Math.sqrt(dx * dx + dy * dy);
+
+    if (dragSpeed > 2) {
+      disturb(mouseX, mouseY, 15 + dragSpeed * 0.5, 80 + dragSpeed * 3);
+      updateDragSound(dragSpeed);
+    }
+  }
+
+  function onTouchEnd(e) {
+    if (e.touches.length === 0) {
+      isPointerDown = false;
+      mouseX = -1;
+      mouseY = -1;
+      stopDragSound();
+      dragSpeed = 0;
+    }
+  }
+
+  // ---------- 主循环 ----------
+  let frameCount = 0;
+  function loop() {
+    frameCount++;
+
+    // 添加环境微波
+    addAmbientNoise();
+
+    // 更新波动方程（每帧迭代一次，60fps）
+    updateWave();
+
+    // 渲染
+    render();
+
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- 启动 ----------
+  init();
+
+})();
+</script>
+</body>
+</html>
