@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>碎玻璃</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+    font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  canvas {
+    display: block;
+    position: absolute;
+    top: 0; left: 0;
+  }
+  /* 重置按钮 */
+  #resetBtn {
+    position: fixed;
+    right: 24px;
+    bottom: 48px;
+    z-index: 100;
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: rgba(255,255,255,0.85);
+    font-size: 14px;
+    padding: 8px 18px;
+    border-radius: 20px;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    transition: background 0.2s, transform 0.1s;
+    letter-spacing: 1px;
+  }
+  #resetBtn:hover {
+    background: rgba(255,255,255,0.22);
+    transform: scale(1.05);
+  }
+  #resetBtn:active { transform: scale(0.97); }
+  /* 点击计数 */
+  #counter {
+    position: fixed;
+    right: 24px;
+    bottom: 92px;
+    z-index: 100;
+    color: rgba(255,255,255,0.5);
+    font-size: 13px;
+    letter-spacing: 1px;
+    pointer-events: none;
+  }
+  /* 底部提示文字 */
+  #hint {
+    position: fixed;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.25);
+    font-size: 12px;
+    letter-spacing: 2px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  /* 通关弹窗 */
+  #winOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    background: rgba(0,0,10,0.6);
+    backdrop-filter: blur(4px);
+  }
+  #winOverlay.show { display: flex; }
+  #winOverlay h1 {
+    color: #fff;
+    font-size: 36px;
+    letter-spacing: 4px;
+    text-shadow: 0 0 30px rgba(120,200,255,0.8);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  #winOverlay p {
+    margin-top: 16px;
+    color: rgba(255,255,255,0.6);
+    font-size: 14px;
+    letter-spacing: 2px;
+  }
+  @keyframes pulse {
+    0%,100% { opacity:1; text-shadow: 0 0 30px rgba(120,200,255,0.8); }
+    50% { opacity:0.7; text-shadow: 0 0 60px rgba(120,200,255,1); }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="bgCanvas"></canvas>
+<canvas id="glassCanvas"></canvas>
+
+<div id="counter">0 / 20</div>
+<button id="resetBtn">↺ 重置</button>
+<div id="hint">点击破坏 · 右下角重置</div>
+
+<div id="winOverlay">
+  <h1>💥 玻璃全碎了！</h1>
+  <p>点击右下角重置，重新开始</p>
+</div>
+
+<script>
+'use strict';
+
+/* ============================================================
+   全局状态
+   ============================================================ */
+const bgCanvas    = document.getElementById('bgCanvas');
+const glassCanvas = document.getElementById('glassCanvas');
+const bgCtx       = bgCanvas.getContext('2d');
+const ctx         = glassCanvas.getContext('2d');
+const counterEl   = document.getElementById('counter');
+const winOverlay  = document.getElementById('winOverlay');
+const resetBtn    = document.getElementById('resetBtn');
+
+let W = 0, H = 0;           // 画布尺寸
+let clickCount   = 0;       // 点击次数
+const MAX_CLICKS = 20;      // 最大点击次数
+let isCollapsing = false;   // 是否正在崩塌
+let isResetting  = false;   // 是否正在重置
+let mouseX = 0, mouseY = 0; // 鼠标位置
+
+/* 所有裂纹线段（用于绘制裂缝网络）*/
+let crackLines = [];        // [{x1,y1,x2,y2,alpha,grow,maxLen}]
+
+/* 所有碎片 */
+let shards = [];            // [{points, vx,vy,rot,rotV, x,y, alpha, falling, home}]
+
+/* 裂纹动画队列 */
+let growingCracks = [];     // 正在生长的裂纹
+
+/* 冲击波列表 */
+let ripples = [];           // [{x,y,r,maxR,alpha}]
+
+/* Web Audio 上下文 */
+let audioCtx = null;
+
+/* ============================================================
+   尺寸适配
+   ============================================================ */
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  bgCanvas.width    = glassCanvas.width  = W;
+  bgCanvas.height   = glassCanvas.height = H;
+  drawBackground();
+}
+
+window.addEventListener('resize', () => { resize(); });
+
+/* ============================================================
+   背景绘制（夜景：深蓝渐变 + 模糊光点）
+   ============================================================ */
+const bgLights = [];  // 预生成光点
+
+function initBgLights() {
+  bgLights.length = 0;
+  const count = Math.floor(W * H / 18000) + 6;
+  for (let i = 0; i < count; i++) {
+    bgLights.push({
+      x: Math.random() * W,
+      y: Math.random() * H * 0.8,
+      r: 20 + Math.random() * 80,
+      hue: Math.random() < 0.5 ? 210 : (Math.random() < 0.5 ? 180 : 50),
+      alpha: 0.04 + Math.random() * 0.1,
+    });
+  }
+}
+
+function drawBackground() {
+  // 深蓝夜空渐变
+  const grad = bgCtx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0,   '#050c1a');
+  grad.addColorStop(0.6, '#071525');
+  grad.addColorStop(1,   '#020810');
+  bgCtx.fillStyle = grad;
+  bgCtx.fillRect(0, 0, W, H);
+
+  // 模糊光点（城市灯光感）
+  for (const l of bgLights) {
+    const rg = bgCtx.createRadialGradient(l.x, l.y, 0, l.x, l.y, l.r);
+    rg.addColorStop(0,   `hsla(${l.hue},80%,70%,${l.alpha})`);
+    rg.addColorStop(1,   `hsla(${l.hue},80%,70%,0)`);
+    bgCtx.fillStyle = rg;
+    bgCtx.beginPath();
+    bgCtx.arc(l.x, l.y, l.r, 0, Math.PI * 2);
+    bgCtx.fill();
+  }
+}
+
+/* ============================================================
+   Web Audio 初始化（懒加载，首次交互后创建）
+   ============================================================ */
+function ensureAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+/* 白噪声缓冲区（复用） */
+let noiseBuffer = null;
+function getNoiseBuffer(duration = 1) {
+  if (!audioCtx) return null;
+  const sr     = audioCtx.sampleRate;
+  const frames = Math.floor(sr * duration);
+  if (!noiseBuffer || noiseBuffer.length < frames) {
+    noiseBuffer = audioCtx.createBuffer(1, frames, sr);
+    const data  = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+  }
+  return noiseBuffer;
+}
+
+/* 点击裂纹声：短促"咔" + 嘶嘶延续 */
+function playCrackSound() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+
+  // —— "咔"：白噪声 + 高通滤波，极短衰减
+  const src1   = audioCtx.createBufferSource();
+  src1.buffer  = getNoiseBuffer(0.1);
+  const hp1    = audioCtx.createBiquadFilter();
+  hp1.type     = 'highpass';
+  hp1.frequency.value = 3000 + Math.random() * 4000;
+  const gain1  = audioCtx.createGain();
+  gain1.gain.setValueAtTime(0.6, t);
+  gain1.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+  src1.connect(hp1); hp1.connect(gain1); gain1.connect(audioCtx.destination);
+  src1.start(t); src1.stop(t + 0.07);
+
+  // —— "嘶嘶"：低通白噪声，缓慢衰减
+  const src2   = audioCtx.createBufferSource();
+  src2.buffer  = getNoiseBuffer(0.5);
+  const lp2    = audioCtx.createBiquadFilter();
+  lp2.type     = 'bandpass';
+  lp2.frequency.value = 8000;
+  lp2.Q.value  = 0.5;
+  const gain2  = audioCtx.createGain();
+  gain2.gain.setValueAtTime(0.08, t + 0.03);
+  gain2.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+  src2.connect(lp2); lp2.connect(gain2); gain2.connect(audioCtx.destination);
+  src2.start(t + 0.03); src2.stop(t + 0.55);
+}
+
+/* 碎片颤抖声：极低音量高频颤音 */
+function playShimmerSound() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc  = audioCtx.createOscillator();
+  osc.type   = 'sine';
+  osc.frequency.setValueAtTime(4000 + Math.random() * 3000, t);
+  osc.frequency.linearRampToValueAtTime(6000 + Math.random() * 2000, t + 0.3);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.025, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 0.35);
+}
+
+/* 崩塌音效：低频"砰" + 玻璃哗啦声 */
+function playCollapseSound() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+
+  // 低频砰
+  const osc  = audioCtx.createOscillator();
+  osc.type   = 'sine';
+  osc.frequency.setValueAtTime(80, t);
+  osc.frequency.exponentialRampToValueAtTime(20, t + 0.4);
+  const g1   = audioCtx.createGain();
+  g1.gain.setValueAtTime(1.0, t);
+  g1.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+  osc.connect(g1); g1.connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 0.55);
+
+  // 玻璃哗啦声（多层随机噪声叠加）
+  for (let i = 0; i < 8; i++) {
+    const delay = i * 0.05;
+    const src   = audioCtx.createBufferSource();
+    src.buffer  = getNoiseBuffer(2);
+    const bp    = audioCtx.createBiquadFilter();
+    bp.type     = 'bandpass';
+    bp.frequency.value = 1000 + Math.random() * 6000;
+    bp.Q.value  = 1 + Math.random() * 3;
+    const g     = audioCtx.createGain();
+    g.gain.setValueAtTime(0, t + delay);
+    g.gain.linearRampToValueAtTime(0.15, t + delay + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.001, t + delay + 1.5);
+    src.connect(bp); bp.connect(g); g.connect(audioCtx.destination);
+    src.start(t + delay); src.stop(t + delay + 1.6);
+  }
+}
+
+/* 重置愈合声：上扬音调，清脆 */
+function playResetSound() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  for (let i = 0; i < 5; i++) {
+    const delay = i * 0.07;
+    const osc   = audioCtx.createOscillator();
+    osc.type    = 'triangle';
+    osc.frequency.setValueAtTime(300 + i * 200, t + delay);
+    osc.frequency.linearRampToValueAtTime(600 + i * 300, t + delay + 0.15);
+    const g     = audioCtx.createGain();
+    g.gain.setValueAtTime(0.12, t + delay);
+    g.gain.exponentialRampToValueAtTime(0.001, t + delay + 0.2);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(t + delay); osc.stop(t + delay + 0.25);
+  }
+}
+
+/* ============================================================
+   裂纹生成
+   生成从 (cx, cy) 向外放射的裂纹线段树
+   ============================================================ */
+function generateCracks(cx, cy) {
+  const branchCount = 3 + Math.floor(Math.random() * 5); // 3-7条主干
+  const newLines = [];
+
+  for (let b = 0; b < branchCount; b++) {
+    // 主干方向：均匀分布带随机扰动
+    const baseAngle = (b / branchCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.8;
+    const mainLen   = 80 + Math.random() * Math.max(W, H) * 0.3;
+
+    // 主干线段（逐步生长）
+    const mainLine = {
+      x1: cx, y1: cy,
+      x2: cx + Math.cos(baseAngle) * mainLen,
+      y2: cy + Math.sin(baseAngle) * mainLen,
+      alpha: 0.85 + Math.random() * 0.15,
+      progress: 0,       // 0-1 生长进度
+      speed: 0.025 + Math.random() * 0.02,
+      children: [],      // 分叉
+      drawn: false,
+    };
+
+    // 2-3条分叉
+    const subCount = 2 + Math.floor(Math.random() * 2);
+    for (let s = 0; s < subCount; s++) {
+      const forkT   = 0.3 + Math.random() * 0.5; // 分叉点在主干的比例
+      const forkAngle = baseAngle + (Math.random() - 0.5) * 1.2;
+      const forkLen   = mainLen * (0.3 + Math.random() * 0.4);
+      const forkX = cx + Math.cos(baseAngle) * mainLen * forkT;
+      const forkY = cy + Math.sin(baseAngle) * mainLen * forkT;
+
+      mainLine.children.push({
+        x1: forkX, y1: forkY,
+        x2: forkX + Math.cos(forkAngle) * forkLen,
+        y2: forkY + Math.sin(forkAngle) * forkLen,
+        alpha: 0.6 + Math.random() * 0.3,
+        startAt: forkT,  // 主干到达 forkT 后才开始生长
+        progress: 0,
+        speed: 0.03 + Math.random() * 0.025,
+        drawn: false,
+      });
+    }
+
+    newLines.push(mainLine);
+  }
+
+  // 加入生长动画队列
+  growingCracks.push(...newLines);
+  // 加入永久裂纹池
+  crackLines.push(...newLines.map(l => ({
+    ...l,
+    flatChildren: l.children,
+  })));
+
+  return newLines;
+}
+
+/* ============================================================
+   碎片生成（基于当前裂纹网格做简易 Voronoi 分割）
+   ============================================================ */
+function generateShards() {
+  shards = [];
+  if (crackLines.length === 0) return;
+
+  // 收集所有端点作为 Voronoi 种子
+  const seeds = [];
+  for (const l of crackLines) {
+    seeds.push({ x: l.x1, y: l.y1 });
+    seeds.push({ x: l.x2, y: l.y2 });
+    if (l.flatChildren) {
+      for (const c of l.flatChildren) {
+        seeds.push({ x: c.x1, y: c.y1 });
+        seeds.push({ x: c.x2, y: c.y2 });
+      }
+    }
+  }
+
+  // 去重
+  const unique = [];
+  const seen   = new Set();
+  for (const s of seeds) {
+    const key = `${Math.round(s.x/8)}_${Math.round(s.y/8)}`;
+    if (!seen.has(key)) { seen.add(key); unique.push(s); }
+  }
+
+  // 按 Voronoi 区域采样（网格法）
+  const cellW = 60, cellH = 60;
+  const cols  = Math.ceil(W / cellW);
+  const rows  = Math.ceil(H / cellH);
+
+  // 每个网格单元找最近种子 → 碎片多边形（简化：用网格直接当碎片）
+  // 为简化实现，直接用 seed 周围的 Delaunay 三角形做碎片
+  // 这里采用"种子+随机Voronoi区域"简化方案：
+  // 将屏幕分割成若干随机多边形，作为碎片
+
+  // 合并有限种子：加4角保证全覆盖
+  const pts = [
+    ...unique,
+    { x: 0, y: 0 }, { x: W, y: 0 }, { x: 0, y: H }, { x: W, y: H },
+    { x: W/2, y: 0 }, { x: W/2, y: H }, { x: 0, y: H/2 }, { x: W, y: H/2 },
+  ];
+
+  // 简化：使用网格划分，每格是一个碎片，增加随机偏移模拟不规则
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const bx = c * cellW, by = r * cellH;
+      const jitter = () => (Math.random() - 0.5) * 20;
+      const poly = [
+        { x: bx + jitter(),        y: by + jitter() },
+        { x: bx + cellW + jitter(),y: by + jitter() },
+        { x: bx + cellW + jitter(),y: by + cellH + jitter() },
+        { x: bx + jitter(),        y: by + cellH + jitter() },
+      ];
+      // 中心点
+      const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
+      const cy = poly.reduce((s, p) => s + p.y, 0) / poly.length;
+
+      shards.push({
+        points: poly,       // 多边形顶点（原始）
+        cx, cy,             // 中心
+        homeX: cx,          // 归位中心X
+        homeY: cy,          // 归位中心Y
+        vx: 0, vy: 0,       // 速度
+        rot: 0,             // 当前旋转
+        rotV: 0,            // 旋转速度
+        alpha: 1,
+        falling: false,
+        shimmer: 0,         // 颤抖相位
+        hueShift: (Math.random() - 0.5) * 30, // 色差偏移
+      });
+    }
+  }
+}
+
+/* ============================================================
+   主渲染循环
+   ============================================================ */
+let lastTime = 0;
+
+function tick(ts) {
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // 1. 绘制玻璃底层（半透明面板）
+  drawGlassLayer();
+
+  // 2. 更新并绘制正在生长的裂纹
+  updateGrowingCracks(dt);
+
+  // 3. 绘制已完成的裂纹网络
+  drawCrackNetwork();
+
+  // 4. 绘制碎片（崩塌/颤抖状态）
+  if (clickCount > 10 || isCollapsing) {
+    updateShards(dt);
+    drawShards();
+  }
+
+  // 5. 绘制冲击波
+  updateRipples(dt);
+  drawRipples();
+
+  requestAnimationFrame(tick);
+}
+
+/* ============================================================
+   玻璃层绘制（带菲涅耳反光 + 噪点）
+   ============================================================ */
+function drawGlassLayer() {
+  if (isCollapsing && shards.length > 0) return; // 崩塌后由碎片代替
+
+  // 菲涅耳：边缘更亮的径向渐变
+  const cx = mouseX || W / 2, cy = mouseY || H / 2;
+  const r  = Math.max(W, H) * 0.7;
+  const fresnelGrad = ctx.createRadialGradient(cx, cy, 0, W/2, H/2, r);
+  fresnelGrad.addColorStop(0,   'rgba(255,255,255,0.04)');
+  fresnelGrad.addColorStop(0.6, 'rgba(255,255,255,0.06)');
+  fresnelGrad.addColorStop(1,   'rgba(255,255,255,0.18)');
+  ctx.fillStyle = fresnelGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // 鼠标跟随高光
+  const hGrad = ctx.createRadialGradient(mouseX, mouseY, 0, mouseX, mouseY, 180);
+  hGrad.addColorStop(0,   'rgba(255,255,255,0.07)');
+  hGrad.addColorStop(1,   'rgba(255,255,255,0)');
+  ctx.fillStyle = hGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // 噪点（每帧轻微随机，但仅在低频更新，避免性能问题）
+  drawNoiseTexture();
+}
+
+/* 极淡噪点纹理（每N帧更新一次） */
+let noiseFrame = 0;
+let noiseImageData = null;
+function drawNoiseTexture() {
+  noiseFrame++;
+  if (noiseFrame % 4 !== 0) {
+    if (noiseImageData) ctx.putImageData(noiseImageData, 0, 0); // 复用上次
+    return;
+  }
+  // 降采样：每 4px 画一个噪点
+  const step = 4;
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const v = Math.random() > 0.98 ? Math.floor(Math.random() * 30) : 0;
+      if (v === 0) continue;
+      for (let dy = 0; dy < step && y + dy < H; dy++) {
+        for (let dx = 0; dx < step && x + dx < W; dx++) {
+          const i = ((y + dy) * W + (x + dx)) * 4;
+          d[i] = d[i+1] = d[i+2] = 255;
+          d[i+3] = v;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  noiseImageData = imgData;
+}
+
+/* ============================================================
+   裂纹生长动画
+   ============================================================ */
+function updateGrowingCracks(dt) {
+  const speed = 1; // 每帧推进倍率
+  for (const line of growingCracks) {
+    if (line.progress < 1) {
+      line.progress = Math.min(1, line.progress + line.speed * 60 * dt * speed);
+    }
+    for (const child of line.children) {
+      if (line.progress >= child.startAt && child.progress < 1) {
+        child.progress = Math.min(1, child.progress + child.speed * 60 * dt * speed);
+      }
+    }
+  }
+  // 清理已完成
+  growingCracks = growingCracks.filter(l => l.progress < 1 ||
+    l.children.some(c => c.progress < 1));
+}
+
+/* ============================================================
+   裂纹网络绘制
+   ============================================================ */
+function drawCrackNetwork() {
+  ctx.save();
+  ctx.shadowBlur    = 4;
+  ctx.shadowColor   = 'rgba(255,255,255,0.9)';
+  ctx.lineCap       = 'round';
+
+  for (const line of crackLines) {
+    const prog = line.flatChildren
+      ? (crackLines.indexOf(line) < crackLines.length ? line.progress ?? 1 : 1)
+      : 1;
+    drawCrackLine(line, prog);
+
+    if (line.flatChildren) {
+      for (const child of line.flatChildren) {
+        if ((line.progress ?? 1) >= child.startAt) {
+          drawCrackLine(child, child.progress ?? 1);
+        }
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawCrackLine(line, progress) {
+  if (progress <= 0) return;
+  const p   = Math.min(progress, 1);
+  const ex  = line.x1 + (line.x2 - line.x1) * p;
+  const ey  = line.y1 + (line.y2 - line.y1) * p;
+  ctx.beginPath();
+  ctx.moveTo(line.x1, line.y1);
+  ctx.lineTo(ex, ey);
+  ctx.strokeStyle = `rgba(255,255,255,${line.alpha ?? 0.9})`;
+  ctx.lineWidth   = 1 + Math.random() * 0.5;
+  ctx.stroke();
+}
+
+/* ============================================================
+   碎片更新与绘制
+   ============================================================ */
+function updateShards(dt) {
+  if (!isCollapsing) {
+    // 仅颤抖
+    const shimmerIntensity = Math.min((clickCount - 10) / 10, 1) * 0.5;
+    for (const s of shards) {
+      s.shimmer = (s.shimmer || 0) + dt * (8 + Math.random() * 4);
+      s.vx = Math.sin(s.shimmer * 1.3) * shimmerIntensity;
+      s.vy = Math.cos(s.shimmer * 0.9) * shimmerIntensity;
+    }
+  } else {
+    // 崩塌掉落
+    const gravity = 600;
+    let allGone = true;
+    for (const s of shards) {
+      s.vy  += gravity * dt;
+      s.vx  += (Math.random() - 0.5) * 50 * dt;
+      s.cx  += s.vx * dt;
+      s.cy  += s.vy * dt;
+      s.rot += s.rotV * dt;
+      s.rotV += (Math.random() - 0.5) * 5 * dt;
+      if (s.cy < H + 200) allGone = false;
+      // 淡出
+      if (s.cy > H * 0.8) {
+        s.alpha = Math.max(0, 1 - (s.cy - H * 0.8) / (H * 0.4));
+      }
+    }
+    if (allGone) {
+      winOverlay.classList.add('show');
+    }
+  }
+}
+
+function drawShards() {
+  for (const s of shards) {
+    if (s.alpha <= 0) continue;
+    ctx.save();
+    ctx.globalAlpha = s.alpha;
+    const offsetX = s.cx - s.homeX + (s.vx || 0);
+    const offsetY = s.cy - s.homeY + (s.vy || 0);
+    ctx.translate(s.cx, s.cy);
+    ctx.rotate(s.rot || 0);
+    ctx.translate(-s.cx, -s.cy);
+
+    // 绘制碎片形状
+    ctx.beginPath();
+    const pts = s.points;
+    ctx.moveTo(pts[0].x + offsetX, pts[0].y + offsetY);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i].x + offsetX, pts[i].y + offsetY);
+    }
+    ctx.closePath();
+
+    // 玻璃质感填充（轻微蓝/绿色差）
+    const gx = s.cx + offsetX, gy = s.cy + offsetY;
+    const shardGrad = ctx.createLinearGradient(gx - 30, gy - 30, gx + 30, gy + 30);
+    const hue = 200 + s.hueShift;
+    shardGrad.addColorStop(0, `hsla(${hue},60%,80%,0.15)`);
+    shardGrad.addColorStop(1, `hsla(${hue+20},70%,90%,0.08)`);
+    ctx.fillStyle   = shardGrad;
+    ctx.strokeStyle = `rgba(180,220,255,0.5)`;
+    ctx.lineWidth   = 0.5;
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+/* ============================================================
+   冲击波（点击涟漪）
+   ============================================================ */
+function updateRipples(dt) {
+  for (const r of ripples) {
+    r.r     += 600 * dt;
+    r.alpha  = Math.max(0, 1 - r.r / r.maxR);
+  }
+  ripples = ripples.filter(r => r.alpha > 0);
+}
+
+function drawRipples() {
+  for (const r of ripples) {
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,255,255,${r.alpha * 0.8})`;
+    ctx.lineWidth   = 2;
+    ctx.shadowBlur  = 12;
+    ctx.shadowColor = 'rgba(255,255,255,0.6)';
+    ctx.stroke();
+    ctx.shadowBlur  = 0;
+  }
+}
+
+/* ============================================================
+   点击处理
+   ============================================================ */
+function handleClick(x, y) {
+  if (isCollapsing || isResetting) return;
+  ensureAudio();
+
+  clickCount++;
+  counterEl.textContent = `${clickCount} / ${MAX_CLICKS}`;
+
+  // 冲击波
+  ripples.push({ x, y, r: 2, maxR: 200 + Math.random() * 100, alpha: 1 });
+
+  // 生成裂纹
+  generateCracks(x, y);
+
+  // 音效
+  playCrackSound();
+
+  // 震动反馈（移动端）
+  if (navigator.vibrate) navigator.vibrate(20);
+
+  // 严重破碎时触发颤抖音效
+  if (clickCount > 10 && clickCount % 3 === 0) {
+    playShimmerSound();
+    generateShards(); // 重新生成碎片（更新区域）
+  }
+
+  // 达到20次：触发崩塌
+  if (clickCount >= MAX_CLICKS) {
+    setTimeout(() => triggerCollapse(), 300);
+  }
+}
+
+function triggerCollapse() {
+  isCollapsing = true;
+  generateShards(); // 最终碎片
+
+  // 初始化崩塌速度
+  for (const s of shards) {
+    s.vx   = (Math.random() - 0.5) * 200;
+    s.vy   = Math.random() * 100 + 50;
+    s.rotV = (Math.random() - 0.5) * 10;
+    s.alpha = 1;
+  }
+
+  playCollapseSound();
+  if (navigator.vibrate) navigator.vibrate([50, 50, 100, 50, 200]);
+}
+
+/* ============================================================
+   重置
+   ============================================================ */
+function resetGlass() {
+  if (isResetting) return;
+  ensureAudio();
+
+  isResetting  = true;
+  isCollapsing = false;
+  winOverlay.classList.remove('show');
+  playResetSound();
+
+  // 碎片飞回（简化：直接淡出）
+  let step = 0;
+  const steps = 40;
+  function flyBack() {
+    step++;
+    if (step <= steps) {
+      const t = step / steps;
+      const ease = 1 - Math.pow(1 - t, 3);
+      for (const s of shards) {
+        s.cx   += (s.homeX - s.cx) * 0.15;
+        s.cy   += (s.homeY - s.cy) * 0.15;
+        s.rot  *= 0.85;
+        s.rotV *= 0.8;
+        s.vx   *= 0.8;
+        s.vy   *= 0.8;
+        s.alpha = ease;
+      }
+      requestAnimationFrame(flyBack);
+    } else {
+      // 重置所有状态
+      clickCount   = 0;
+      crackLines   = [];
+      growingCracks= [];
+      shards       = [];
+      ripples      = [];
+      isCollapsing = false;
+      isResetting  = false;
+      counterEl.textContent = `0 / ${MAX_CLICKS}`;
+    }
+  }
+  requestAnimationFrame(flyBack);
+}
+
+/* ============================================================
+   事件监听
+   ============================================================ */
+glassCanvas.addEventListener('click', e => {
+  handleClick(e.clientX, e.clientY);
+});
+
+glassCanvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    handleClick(t.clientX, t.clientY);
+  }
+}, { passive: false });
+
+glassCanvas.addEventListener('mousemove', e => {
+  mouseX = e.clientX;
+  mouseY = e.clientY;
+});
+
+resetBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  resetGlass();
+});
+resetBtn.addEventListener('touchstart', e => {
+  e.stopPropagation();
+  e.preventDefault();
+  resetGlass();
+}, { passive: false });
+
+/* 通关遮罩点击不传递 */
+winOverlay.addEventListener('click', e => e.stopPropagation());
+
+/* ============================================================
+   启动
+   ============================================================ */
+resize();
+initBgLights();
+drawBackground();
+requestAnimationFrame(tick);
+
+</script>
+</body>
+</html>
