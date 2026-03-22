@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>沙堆平衡</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1208;
+    overflow: hidden;
+    font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    touch-action: none;
+    user-select: none;
+  }
+  canvas { display: block; }
+
+  /* 右上角平衡度面板 */
+  #hud {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    background: rgba(10, 7, 2, 0.72);
+    border: 1px solid rgba(200, 169, 110, 0.3);
+    border-radius: 12px;
+    padding: 12px 16px;
+    color: #e8d5a3;
+    text-align: right;
+    backdrop-filter: blur(4px);
+    min-width: 140px;
+    z-index: 10;
+  }
+  #hud .label {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    opacity: 0.7;
+    margin-bottom: 4px;
+  }
+  #hud .percent {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 8px;
+    transition: color 0.5s;
+  }
+  #progress-bar-bg {
+    height: 5px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  #progress-bar {
+    height: 100%;
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.4s, background 0.5s;
+  }
+
+  /* 右下角重置按钮 */
+  #restart-btn {
+    position: fixed;
+    bottom: 40px;
+    right: 16px;
+    background: rgba(10, 7, 2, 0.72);
+    border: 1px solid rgba(200, 169, 110, 0.4);
+    border-radius: 8px;
+    color: #c8a96e;
+    font-size: 13px;
+    padding: 8px 16px;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    z-index: 10;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  #restart-btn:hover {
+    background: rgba(200, 169, 110, 0.15);
+    border-color: rgba(200, 169, 110, 0.7);
+  }
+
+  /* 底部提示 */
+  #hint {
+    position: fixed;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: rgba(200, 169, 110, 0.45);
+    letter-spacing: 0.15em;
+    pointer-events: none;
+    z-index: 10;
+    white-space: nowrap;
+  }
+
+  /* 通关遮罩文字 */
+  #win-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 20;
+    opacity: 0;
+    transition: opacity 0.6s;
+  }
+  #win-overlay.show { opacity: 1; pointer-events: auto; }
+  #win-text {
+    font-size: clamp(32px, 6vw, 64px);
+    font-weight: 900;
+    color: #ffe066;
+    text-shadow:
+      0 0 20px rgba(255,200,0,0.8),
+      0 0 50px rgba(255,180,0,0.5),
+      0 4px 12px rgba(0,0,0,0.6);
+    letter-spacing: 0.15em;
+    animation: winPulse 1.5s ease-in-out infinite alternate;
+  }
+  @keyframes winPulse {
+    from { text-shadow: 0 0 20px rgba(255,200,0,0.8), 0 0 50px rgba(255,180,0,0.5), 0 4px 12px rgba(0,0,0,0.6); }
+    to   { text-shadow: 0 0 40px rgba(255,220,0,1),   0 0 90px rgba(255,200,0,0.8), 0 4px 12px rgba(0,0,0,0.6); }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<!-- HUD 平衡度 -->
+<div id="hud">
+  <div class="label">平 衡 度</div>
+  <div class="percent" id="percent-text">0%</div>
+  <div id="progress-bar-bg">
+    <div id="progress-bar"></div>
+  </div>
+</div>
+
+<!-- 重新开始 -->
+<button id="restart-btn" onclick="restart()">↺ 重新开始</button>
+
+<!-- 底部提示 -->
+<div id="hint">按住拖动拨沙 · 目标：均匀平铺</div>
+
+<!-- 通关遮罩 -->
+<div id="win-overlay">
+  <div id="win-text">完美平衡 ✨</div>
+</div>
+
+<script>
+// ============================================================
+//  沙堆平衡 - 细胞自动机沙粒模拟
+//  作者: AI 生成  /  2024
+// ============================================================
+
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+// ---------- 音频上下文（懒加载） ----------
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+// ---------- 常量 ----------
+const CELL_SIZE = 4;     // 每格代表 4x4 像素（1/4 分辨率）
+const MAX_SAND  = 12;    // 每格最大沙粒数
+const FLOW_THRESHOLD = 2; // 高差超过此值才流动
+const BRUSH_RADIUS_PX = 30; // 拨沙半径（像素）
+const WIN_THRESHOLD = 0.95; // 通关平衡度
+
+// ---------- 网格状态 ----------
+let COLS, ROWS;
+let sand = null;        // Float32Array — 当前沙粒数
+let sandNext = null;    // Float32Array — 下一帧缓冲
+let colorNoise = null;  // Float32Array — 每格随机色差（固定）
+
+// ---------- 渲染层 ----------
+let imgData = null;
+
+// ---------- 交互状态 ----------
+let isDragging  = false;
+let mouseX = 0, mouseY = 0;
+let lastMouseX = 0, lastMouseY = 0;
+let mouseSpeed = 0;
+
+// ---------- 游戏状态 ----------
+let totalSand   = 0;      // 初始总沙粒数
+let balance     = 0;      // 当前平衡度 [0,1]
+let won         = false;
+let milestones  = new Set(); // 已触发里程碑
+let animating   = false;  // 落沙入场动画中
+let fallingBatch = [];    // 入场动画批次
+
+// ---------- 通关粒子 ----------
+let winParticles = [];
+
+// ============================================================
+//  初始化
+// ============================================================
+function init() {
+  resizeCanvas();
+  window.addEventListener('resize', () => { resizeCanvas(); restart(); });
+  bindEvents();
+  restart();
+  requestAnimationFrame(loop);
+}
+
+function resizeCanvas() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+
+// ============================================================
+//  重新开始
+// ============================================================
+function restart() {
+  COLS = Math.ceil(canvas.width  / CELL_SIZE);
+  ROWS = Math.ceil(canvas.height / CELL_SIZE);
+
+  const n = COLS * ROWS;
+  sand      = new Float32Array(n);
+  sandNext  = new Float32Array(n);
+  colorNoise = new Float32Array(n);
+  imgData   = ctx.createImageData(canvas.width, canvas.height);
+
+  // 填充 imgData 背景色 #1a1208
+  const bg = imgData.data;
+  for (let i = 0; i < bg.length; i += 4) {
+    bg[i]   = 0x1a;
+    bg[i+1] = 0x12;
+    bg[i+2] = 0x08;
+    bg[i+3] = 255;
+  }
+
+  // 每格随机色差 [-0.1, +0.1]
+  for (let i = 0; i < n; i++) colorNoise[i] = (Math.random() - 0.5) * 0.2;
+
+  won = false;
+  balance = 0;
+  milestones.clear();
+  winParticles = [];
+  document.getElementById('win-overlay').classList.remove('show');
+
+  updateHUD(0);
+  buildInitialSand();
+}
+
+// ============================================================
+//  生成初始沙堆（几座小山）
+// ============================================================
+function buildInitialSand() {
+  // 先填好目标格子
+  const tempSand = new Float32Array(COLS * ROWS);
+
+  // 随机生成 5~8 座小山
+  const numHills = 5 + Math.floor(Math.random() * 4);
+  for (let h = 0; h < numHills; h++) {
+    const cx = Math.floor(COLS * (0.1 + Math.random() * 0.8));
+    const cy = Math.floor(ROWS * (0.2 + Math.random() * 0.6));
+    const rx = 4 + Math.floor(Math.random() * 14);
+    const ry = 3 + Math.floor(Math.random() * 10);
+    const peak = 6 + Math.floor(Math.random() * 5);
+
+    for (let dy = -ry * 2; dy <= ry * 2; dy++) {
+      for (let dx = -rx * 2; dx <= rx * 2; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+        const d = Math.hypot(dx / rx, dy / ry);
+        if (d < 1) {
+          const amount = peak * Math.pow(1 - d, 1.5) * (0.7 + Math.random() * 0.3);
+          tempSand[ny * COLS + nx] += amount;
+        }
+      }
+    }
+  }
+
+  // 收集所有有沙的格子，用入场动画分批落下
+  fallingBatch = [];
+  for (let i = 0; i < tempSand.length; i++) {
+    if (tempSand[i] > 0) {
+      fallingBatch.push({ idx: i, val: tempSand[i] });
+      totalSand += tempSand[i];
+    }
+  }
+
+  // 按列顺序排，让沙子"从上往下落"的感觉
+  fallingBatch.sort((a, b) => (a.idx % COLS) - (b.idx % COLS) || (a.idx / COLS | 0) - (b.idx / COLS | 0));
+
+  animating = true;
+  totalSand = 0;
+  // 先统计好总沙量（用于平衡度计算）
+  for (const fb of fallingBatch) totalSand += fb.val;
+
+  // 执行入场动画（约1秒）
+  doFallAnimation(tempSand);
+}
+
+// 入场动画：逐步显示沙粒
+function doFallAnimation(targetSand) {
+  const duration = 1000; // ms
+  const startTime = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - startTime) / duration);
+    // easeInOut
+    const e = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+    for (let i = 0; i < sand.length; i++) {
+      sand[i] = targetSand[i] * e;
+    }
+    renderFull();
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      for (let i = 0; i < sand.length; i++) sand[i] = targetSand[i];
+      animating = false;
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+// ============================================================
+//  主循环
+// ============================================================
+let lastTime = 0;
+let slideAccum = 0; // 累积时间，控制滑落速度
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (animating) return; // 入场动画由独立 rAF 驱动
+
+  const dt = Math.min(40, now - lastTime);
+  lastTime = now;
+
+  slideAccum += dt;
+
+  // 物理模拟：约每 33ms（30fps）执行一次，避免过快
+  if (slideAccum >= 33) {
+    slideAccum = 0;
+    simulateStep();
+  }
+
+  // 处理鼠标拨沙
+  if (isDragging) {
+    applyBrush();
+    // 沙沙声
+    playSandSound(mouseSpeed);
+  }
+
+  // 计算平衡度
+  updateBalance();
+  updateHUD(balance);
+  checkMilestones();
+
+  // 渲染
+  renderFull();
+
+  // 通关粒子
+  if (won) {
+    updateWinParticles(dt);
+    drawWinParticles();
+  }
+}
+
+// ============================================================
+//  细胞自动机物理模拟
+// ============================================================
+function simulateStep() {
+  // 复制到 sandNext
+  sandNext.set(sand);
+
+  // 遍历所有格子，判断是否需要流动
+  // 为避免方向偏置，随机选择遍历方向
+  const flipH = Math.random() < 0.5;
+  const flipV = Math.random() < 0.5;
+
+  for (let ry = 0; ry < ROWS; ry++) {
+    const r = flipV ? ROWS - 1 - ry : ry;
+    for (let rc = 0; rc < COLS; rc++) {
+      const c = flipH ? COLS - 1 - rc : rc;
+      const idx = r * COLS + c;
+      const val = sand[idx];
+      if (val <= 0) continue;
+
+      // 四个方向：下、左、右、上（优先向下流）
+      const neighbors = [
+        r < ROWS - 1 ? idx + COLS : -1,   // 下
+        c > 0        ? idx - 1    : -1,   // 左
+        c < COLS - 1 ? idx + 1    : -1,   // 右
+        r > 0        ? idx - COLS : -1,   // 上（最低优先级）
+      ];
+
+      // 向下流动（重力最强）
+      const downIdx = neighbors[0];
+      if (downIdx !== -1) {
+        const diff = val - sand[downIdx];
+        if (diff > FLOW_THRESHOLD) {
+          const flow = Math.min(diff * 0.3, 1);
+          sandNext[idx]     -= flow;
+          sandNext[downIdx] += flow;
+          continue;
+        }
+      }
+
+      // 横向流动（低于两格才流）
+      for (let i = 1; i <= 2; i++) {
+        const nIdx = neighbors[i];
+        if (nIdx === -1) continue;
+        const diff = val - sand[nIdx];
+        if (diff > FLOW_THRESHOLD + 1) {
+          const flow = Math.min(diff * 0.15, 0.6);
+          sandNext[idx]  -= flow;
+          sandNext[nIdx] += flow;
+        }
+      }
+    }
+  }
+
+  // 夹紧范围，交换缓冲
+  for (let i = 0; i < sandNext.length; i++) {
+    sandNext[i] = Math.max(0, Math.min(MAX_SAND, sandNext[i]));
+  }
+  const tmp = sand;
+  sand = sandNext;
+  sandNext = tmp;
+}
+
+// ============================================================
+//  鼠标拨沙
+// ============================================================
+function applyBrush() {
+  const bx = Math.floor(mouseX / CELL_SIZE);
+  const by = Math.floor(mouseY / CELL_SIZE);
+  const br = Math.ceil(BRUSH_RADIUS_PX / CELL_SIZE);
+
+  // 计算移动方向，推沙到两侧
+  const dx = mouseX - lastMouseX;
+  const dy = mouseY - lastMouseY;
+  const len = Math.hypot(dx, dy) || 1;
+  // 垂直于移动方向 = 沙被推到的方向
+  const perpX =  dy / len;
+  const perpY = -dx / len;
+
+  for (let dr = -br; dr <= br; dr++) {
+    for (let dc = -br; dc <= br; dc++) {
+      const nr = by + dr, nc = bx + dc;
+      if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+      const dist = Math.hypot(dc, dr) * CELL_SIZE;
+      if (dist > BRUSH_RADIUS_PX) continue;
+
+      const falloff = 1 - dist / BRUSH_RADIUS_PX;
+      const idx = nr * COLS + nc;
+      const removed = sand[idx] * falloff * 0.25;
+      sand[idx] -= removed;
+
+      // 把移除的沙推到两侧
+      const pushStr = 1.5;
+      const px1 = Math.floor(nc + perpX * br * pushStr);
+      const py1 = Math.floor(nr + perpY * br * pushStr);
+      const px2 = Math.floor(nc - perpX * br * pushStr);
+      const py2 = Math.floor(nr - perpY * br * pushStr);
+
+      if (px1 >= 0 && px1 < COLS && py1 >= 0 && py1 < ROWS)
+        sand[py1 * COLS + px1] = Math.min(MAX_SAND, sand[py1 * COLS + px1] + removed * 0.5);
+      if (px2 >= 0 && px2 < COLS && py2 >= 0 && py2 < ROWS)
+        sand[py2 * COLS + px2] = Math.min(MAX_SAND, sand[py2 * COLS + px2] + removed * 0.5);
+    }
+  }
+
+  lastMouseX = mouseX;
+  lastMouseY = mouseY;
+}
+
+// ============================================================
+//  计算平衡度
+// ============================================================
+function updateBalance() {
+  if (totalSand <= 0) { balance = 0; return; }
+
+  // 理想每格沙量
+  const ideal = totalSand / (COLS * ROWS);
+  if (ideal <= 0) { balance = 0; return; }
+
+  // 计算实际分布的标准差
+  let sumDiff = 0;
+  let count = 0;
+  for (let i = 0; i < sand.length; i++) {
+    const diff = Math.abs(sand[i] - ideal);
+    sumDiff += diff;
+    count++;
+  }
+  const meanDiff = sumDiff / count;
+  // 归一化：meanDiff 为 0 时 balance=1，meanDiff 越大 balance 越小
+  // 用 ideal 归一化，限制在 [0,1]
+  const rawBalance = Math.max(0, 1 - meanDiff / (ideal + 0.01));
+  // 平滑一点
+  balance = balance * 0.85 + rawBalance * 0.15;
+}
+
+// ============================================================
+//  更新 HUD
+// ============================================================
+function updateHUD(b) {
+  const pct = Math.round(b * 100);
+  document.getElementById('percent-text').textContent = pct + '%';
+  document.getElementById('progress-bar').style.width = pct + '%';
+
+  // 颜色：0% 红 → 50% 橙 → 100% 金
+  const r = Math.round(lerp(200, 255, Math.min(1, b * 2)));
+  const g = Math.round(lerp(80,  200, b));
+  const bl = Math.round(lerp(80,  50,  b));
+  const color = `rgb(${r},${g},${bl})`;
+  document.getElementById('percent-text').style.color = color;
+  document.getElementById('progress-bar').style.background = color;
+}
+
+// ============================================================
+//  里程碑音效
+// ============================================================
+function checkMilestones() {
+  const milestoneList = [0.25, 0.50, 0.75];
+  for (const m of milestoneList) {
+    if (balance >= m && !milestones.has(m)) {
+      milestones.add(m);
+      playMilestone(m);
+    }
+  }
+
+  if (!won && balance >= WIN_THRESHOLD) {
+    won = true;
+    triggerWin();
+  }
+}
+
+// ============================================================
+//  全量渲染
+// ============================================================
+function renderFull() {
+  const data = imgData.data;
+  const W = canvas.width;
+  const H = canvas.height;
+
+  // 底色 #1a1208
+  const bgR = 0x1a, bgG = 0x12, bgB = 0x08;
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const s = sand[r * COLS + c];
+      const noise = colorNoise[r * COLS + c];
+
+      // 基础沙黄色 #c8a96e，堆积越高越深
+      let baseR = 0xc8, baseG = 0xa9, baseB = 0x6e;
+
+      if (s <= 0) {
+        // 无沙，绘制背景色
+        const px = c * CELL_SIZE;
+        const py = r * CELL_SIZE;
+        fillRect(data, W, H, px, py, CELL_SIZE, CELL_SIZE, bgR, bgG, bgB);
+        continue;
+      }
+
+      // 根据高度加深（阴影感）
+      const heightFactor = Math.min(s / MAX_SAND, 1); // 0~1
+      const darkness = 1 - heightFactor * 0.45;
+
+      // 平衡度越高越趋向均匀金黄 (255, 210, 100)
+      const goldR = 255, goldG = 210, goldB = 100;
+      baseR = Math.round(lerp(baseR, goldR, balance * 0.5));
+      baseG = Math.round(lerp(baseG, goldG, balance * 0.5));
+      baseB = Math.round(lerp(baseB, goldB, balance * 0.5));
+
+      // 应用随机色差和阴影
+      let fr = clamp(Math.round(baseR * darkness * (1 + noise)), 0, 255);
+      let fg = clamp(Math.round(baseG * darkness * (1 + noise)), 0, 255);
+      let fb = clamp(Math.round(baseB * darkness * (1 + noise)), 0, 255);
+
+      // 高光：格子左上角1px 略亮
+      const px = c * CELL_SIZE;
+      const py = r * CELL_SIZE;
+      fillRect(data, W, H, px, py, CELL_SIZE, CELL_SIZE, fr, fg, fb);
+
+      // 高光像素
+      if (heightFactor > 0.2) {
+        const hlR = clamp(fr + 40, 0, 255);
+        const hlG = clamp(fg + 30, 0, 255);
+        const hlB = clamp(fb + 20, 0, 255);
+        setPixel(data, W, H, px, py, hlR, hlG, hlB);
+      }
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+}
+
+// 快速填充矩形到 ImageData
+function fillRect(data, W, H, x, y, w, h, r, g, b) {
+  for (let dy = 0; dy < h; dy++) {
+    const ry = y + dy;
+    if (ry >= H) break;
+    for (let dx = 0; dx < w; dx++) {
+      const rx = x + dx;
+      if (rx >= W) continue;
+      const off = (ry * W + rx) * 4;
+      data[off]   = r;
+      data[off+1] = g;
+      data[off+2] = b;
+      data[off+3] = 255;
+    }
+  }
+}
+
+function setPixel(data, W, H, x, y, r, g, b) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  const off = (y * W + x) * 4;
+  data[off] = r; data[off+1] = g; data[off+2] = b; data[off+3] = 255;
+}
+
+// ============================================================
+//  通关处理
+// ============================================================
+function triggerWin() {
+  document.getElementById('win-overlay').classList.add('show');
+  spawnWinParticles();
+  playWinMusic();
+}
+
+// 生成满屏金色粒子
+function spawnWinParticles() {
+  winParticles = [];
+  const count = 300;
+  for (let i = 0; i < count; i++) {
+    winParticles.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vx: (Math.random() - 0.5) * 6,
+      vy: -Math.random() * 8 - 2,
+      size: 2 + Math.random() * 5,
+      life: 1,
+      decay: 0.008 + Math.random() * 0.015,
+      hue: 38 + (Math.random() - 0.5) * 20,
+    });
+  }
+}
+
+function updateWinParticles(dt) {
+  for (const p of winParticles) {
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vy += 0.12; // 重力
+    p.life -= p.decay;
+    if (p.life < 0) {
+      // 复活
+      p.x = Math.random() * canvas.width;
+      p.y = canvas.height + 10;
+      p.vx = (Math.random() - 0.5) * 6;
+      p.vy = -Math.random() * 10 - 4;
+      p.life = 1;
+    }
+  }
+}
+
+function drawWinParticles() {
+  for (const p of winParticles) {
+    ctx.save();
+    ctx.globalAlpha = p.life * 0.9;
+    ctx.fillStyle = `hsl(${p.hue}, 95%, 65%)`;
+    ctx.shadowColor = `hsl(${p.hue}, 100%, 75%)`;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ============================================================
+//  Web Audio API 音效
+// ============================================================
+
+// 沙沙声（白噪声 + 低通滤波）
+let sandSoundNode = null, sandGainNode = null;
+function playSandSound(speed) {
+  const ac = getAudio();
+  if (!sandGainNode) {
+    const bufSize = ac.sampleRate * 0.1; // 0.1s 缓冲
+    const buffer = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+
+    const source = ac.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    const filter = ac.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 800;
+    filter.Q.value = 0.5;
+
+    sandGainNode = ac.createGain();
+    sandGainNode.gain.value = 0;
+
+    source.connect(filter);
+    filter.connect(sandGainNode);
+    sandGainNode.connect(ac.destination);
+    source.start();
+    sandSoundNode = source;
+  }
+  const vol = Math.min(0.18, speed * 0.003);
+  sandGainNode.gain.linearRampToValueAtTime(vol, ac.currentTime + 0.05);
+}
+
+function stopSandSound() {
+  if (sandGainNode) {
+    const ac = getAudio();
+    sandGainNode.gain.linearRampToValueAtTime(0, ac.currentTime + 0.15);
+  }
+}
+
+// 里程碑音效（清脆上升音调）
+function playMilestone(level) {
+  const ac = getAudio();
+  const notes = {
+    0.25: [523.25, 659.25],   // C5, E5
+    0.50: [523.25, 659.25, 783.99], // C5, E5, G5
+    0.75: [523.25, 659.25, 783.99, 1046.50], // C5 E5 G5 C6
+  };
+  const freqs = notes[level] || [880];
+  freqs.forEach((freq, i) => {
+    setTimeout(() => {
+      const osc  = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ac.currentTime);
+      gain.gain.linearRampToValueAtTime(0.2, ac.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.5);
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.start();
+      osc.stop(ac.currentTime + 0.55);
+    }, i * 120);
+  });
+}
+
+// 通关音乐（音阶上行）
+function playWinMusic() {
+  const ac = getAudio();
+  // C大调音阶上行 + 和弦
+  const scale = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25, 659.25, 783.99, 1046.50];
+  scale.forEach((freq, i) => {
+    setTimeout(() => {
+      const osc  = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = i < 8 ? 'triangle' : 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ac.currentTime);
+      gain.gain.linearRampToValueAtTime(0.25, ac.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.7);
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.start();
+      osc.stop(ac.currentTime + 0.75);
+    }, i * 150);
+  });
+
+  // 最后来个和弦
+  setTimeout(() => {
+    [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+      const osc  = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ac.currentTime);
+      gain.gain.linearRampToValueAtTime(0.15, ac.currentTime + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 2.0);
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.start();
+      osc.stop(ac.currentTime + 2.1);
+    });
+  }, scale.length * 150 + 100);
+}
+
+// ============================================================
+//  事件绑定
+// ============================================================
+function bindEvents() {
+  // 鼠标
+  canvas.addEventListener('mousedown', e => {
+    isDragging = true;
+    mouseX = e.clientX; mouseY = e.clientY;
+    lastMouseX = mouseX; lastMouseY = mouseY;
+    getAudio(); // 激活 AudioContext（需要用户手势）
+  });
+  canvas.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    const dx = e.clientX - mouseX, dy = e.clientY - mouseY;
+    mouseSpeed = Math.hypot(dx, dy);
+    mouseX = e.clientX; mouseY = e.clientY;
+  });
+  window.addEventListener('mouseup', () => {
+    isDragging = false;
+    stopSandSound();
+  });
+
+  // 触摸
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    isDragging = true;
+    const t = e.touches[0];
+    mouseX = t.clientX; mouseY = t.clientY;
+    lastMouseX = mouseX; lastMouseY = mouseY;
+    mouseSpeed = 0;
+    getAudio();
+  }, { passive: false });
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (!isDragging) return;
+    const t = e.touches[0];
+    const dx = t.clientX - mouseX, dy = t.clientY - mouseY;
+    mouseSpeed = Math.hypot(dx, dy);
+    mouseX = t.clientX; mouseY = t.clientY;
+  }, { passive: false });
+  canvas.addEventListener('touchend', e => {
+    e.preventDefault();
+    isDragging = false;
+    stopSandSound();
+  }, { passive: false });
+}
+
+// ============================================================
+//  工具函数
+// ============================================================
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// ============================================================
+//  启动
+// ============================================================
+window.addEventListener('load', init);
+</script>
+</body>
+</html>
