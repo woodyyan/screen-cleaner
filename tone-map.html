@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>音调地图 · Tone Map</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+    cursor: none; /* 隐藏默认鼠标，用Canvas绘制发光圆点 */
+  }
+  canvas {
+    display: block;
+    position: fixed;
+    top: 0; left: 0;
+  }
+  /* 提示文字层 */
+  #hint {
+    position: fixed;
+    bottom: 16px;
+    left: 0; right: 0;
+    text-align: center;
+    font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 13px;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 0.05em;
+    pointer-events: none;
+    user-select: none;
+  }
+  /* 音符名称显示（右上角） */
+  #note-display {
+    position: fixed;
+    top: 20px; right: 28px;
+    font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #fff;
+    opacity: 0;
+    text-align: right;
+    pointer-events: none;
+    user-select: none;
+    transition: color 0.1s ease;
+    text-shadow: 0 0 20px currentColor, 0 0 40px currentColor;
+  }
+  /* 欢迎动画遮罩 */
+  #welcome {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    z-index: 100;
+    pointer-events: none;
+  }
+  #welcome-text {
+    font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 28px;
+    color: rgba(255,255,255,0.8);
+    letter-spacing: 0.1em;
+    animation: welcomeFade 2.2s ease forwards;
+  }
+  @keyframes welcomeFade {
+    0%   { opacity: 0; transform: scale(0.8); }
+    30%  { opacity: 1; transform: scale(1); }
+    70%  { opacity: 1; transform: scale(1); }
+    100% { opacity: 0; transform: scale(1.1); }
+  }
+</style>
+</head>
+<body>
+
+<!-- 主画布：绘制网格 + 轨迹 + 鼠标光点 -->
+<canvas id="canvas"></canvas>
+
+<!-- 右上角音符名称 -->
+<div id="note-display"></div>
+
+<!-- 底部操作提示 -->
+<div id="hint">移动发声 &nbsp;·&nbsp; 按住绘制轨迹 &nbsp;·&nbsp; Shift = 和弦 &nbsp;·&nbsp; 空格 = 清除</div>
+
+<!-- 欢迎动画 -->
+<div id="welcome"><span id="welcome-text">♩ 音调地图</span></div>
+
+<script>
+'use strict';
+
+// ─────────────────────────────────────────────
+// 常量定义
+// ─────────────────────────────────────────────
+
+/** 音符名称（12个半音） */
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+/** X轴范围：C3(MIDI 48) → C6(MIDI 84)，共36个半音 */
+const MIDI_MIN = 48;  // C3
+const MIDI_MAX = 84;  // C6
+const SEMITONE_COUNT = MIDI_MAX - MIDI_MIN; // 36
+
+/** 大三和弦：根音 + 大三度(+4) + 纯五度(+7) */
+const CHORD_INTERVALS = [0, 4, 7];
+
+/** 将 MIDI 音符号转换为频率（Hz），A4 = 440Hz */
+function midiToFreq(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+/** 将 MIDI 号转换为音符名称（如 "C4"） */
+function midiToName(midi) {
+  const octave = Math.floor(midi / 12) - 1;
+  const note   = NOTE_NAMES[midi % 12];
+  return note + octave;
+}
+
+/**
+ * 根据 MIDI 号（相对于范围）映射颜色
+ * 低音 → 红/橙，中音 → 绿/青，高音 → 蓝/紫
+ */
+function midiToColor(midi) {
+  const t = (midi - MIDI_MIN) / SEMITONE_COUNT; // 0~1
+  // 色相：0°(红) → 60°(橙黄) → 120°(绿) → 180°(青) → 240°(蓝) → 300°(紫)
+  const hue = t * 270; // 低音红=0°, 高音紫=270°
+  return `hsl(${hue.toFixed(1)}, 100%, 65%)`;
+}
+
+// ─────────────────────────────────────────────
+// Canvas 初始化
+// ─────────────────────────────────────────────
+
+const canvas  = document.getElementById('canvas');
+const ctx     = canvas.getContext('2d');
+let W = 0, H = 0;
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  drawGrid(); // 重绘网格背景
+}
+window.addEventListener('resize', resize);
+
+// ─────────────────────────────────────────────
+// 网格背景（极淡，隐约可见）
+// ─────────────────────────────────────────────
+
+// 离屏Canvas存储静态网格，避免每帧重绘
+let gridCanvas = null;
+
+function buildGridCanvas() {
+  gridCanvas = document.createElement('canvas');
+  gridCanvas.width  = W;
+  gridCanvas.height = H;
+  const gc = gridCanvas.getContext('2d');
+
+  gc.strokeStyle = 'rgba(255,255,255,0.03)';
+  gc.lineWidth   = 1;
+
+  // 竖线：每个半音格一条
+  for (let i = 0; i <= SEMITONE_COUNT; i++) {
+    const x = (i / SEMITONE_COUNT) * W;
+    gc.beginPath();
+    gc.moveTo(x, 0);
+    gc.lineTo(x, H);
+    gc.stroke();
+  }
+
+  // 横线：10等分
+  const rowCount = 10;
+  for (let j = 0; j <= rowCount; j++) {
+    const y = (j / rowCount) * H;
+    gc.beginPath();
+    gc.moveTo(0, y);
+    gc.lineTo(W, y);
+    gc.stroke();
+  }
+}
+
+function drawGrid() {
+  buildGridCanvas();
+}
+
+// ─────────────────────────────────────────────
+// 轨迹系统（TrailSegment）
+// ─────────────────────────────────────────────
+
+/**
+ * 每段轨迹由若干点连成折线。
+ * alpha: 不透明度 (0~1)，松开鼠标后逐渐衰减到 0
+ */
+const trails = []; // Trail[]
+
+/** 创建新轨迹 */
+function newTrail() {
+  return { points: [], alpha: 1.0, active: true };
+}
+
+let currentTrail = null; // 当前正在绘制的轨迹
+
+// ─────────────────────────────────────────────
+// 音频引擎
+// ─────────────────────────────────────────────
+
+let audioCtx = null; // 懒初始化（需要用户交互后才能创建）
+
+/**
+ * 每个活跃音符对应一个 Voice
+ * Voice = { osc, gainNode, midiNote }
+ */
+const voices = new Map(); // midi → Voice
+
+/** 获取或创建 AudioContext（必须在用户事件中调用） */
+function ensureAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+/**
+ * 合成一个音符的波形：
+ *   - yRatio: Y轴比例 (0=顶部/正弦, 1=底部/锯齿)
+ *   - 通过混合 sine + sawtooth 实现渐变音色
+ */
+function createVoice(midiNote, yRatio, volume) {
+  if (!audioCtx) return null;
+
+  const freq    = midiToFreq(midiNote);
+  const now     = audioCtx.currentTime;
+  const ATTACK  = 0.005; // 5ms 淡入，防止爆音
+
+  // 主增益节点（控制音量）
+  const gainNode = audioCtx.createGain();
+  gainNode.gain.setValueAtTime(0, now);
+  gainNode.gain.linearRampToValueAtTime(volume, now + ATTACK);
+  gainNode.connect(audioCtx.destination);
+
+  // 混合两种波形（通过各自的分增益实现）
+  const sinGain = audioCtx.createGain();
+  const sawGain = audioCtx.createGain();
+
+  // yRatio=0 → sin=1, saw=0；yRatio=1 → sin=0.1, saw=0.9
+  sinGain.gain.value = 1 - yRatio * 0.9;
+  sawGain.gain.value = yRatio * 0.9;
+
+  sinGain.connect(gainNode);
+  sawGain.connect(gainNode);
+
+  // 正弦波振荡器
+  const sinOsc = audioCtx.createOscillator();
+  sinOsc.type      = 'sine';
+  sinOsc.frequency.value = freq;
+  sinOsc.connect(sinGain);
+  sinOsc.start(now);
+
+  // 锯齿波振荡器
+  const sawOsc = audioCtx.createOscillator();
+  sawOsc.type      = 'sawtooth';
+  sawOsc.frequency.value = freq;
+  sawOsc.connect(sawGain);
+  sawOsc.start(now);
+
+  return { sinOsc, sawOsc, gainNode, midiNote };
+}
+
+/** 停止指定 MIDI 音符（带 release 淡出） */
+function stopVoice(midiNote, releaseTime = 0.2) {
+  const voice = voices.get(midiNote);
+  if (!voice) return;
+  const now = audioCtx.currentTime;
+  voice.gainNode.gain.cancelScheduledValues(now);
+  voice.gainNode.gain.setValueAtTime(voice.gainNode.gain.value, now);
+  voice.gainNode.gain.linearRampToValueAtTime(0, now + releaseTime);
+  // 延迟后停止振荡器
+  voice.sinOsc.stop(now + releaseTime + 0.01);
+  voice.sawOsc.stop(now + releaseTime + 0.01);
+  voices.delete(midiNote);
+}
+
+/** 停止所有音符 */
+function stopAllVoices(releaseTime = 0.2) {
+  for (const midi of [...voices.keys()]) {
+    stopVoice(midi, releaseTime);
+  }
+}
+
+// ─────────────────────────────────────────────
+// 交互状态
+// ─────────────────────────────────────────────
+
+let mouseX       = -1;    // 鼠标/触摸 X 坐标
+let mouseY       = -1;    // 鼠标/触摸 Y 坐标
+let prevMouseX   = -1;
+let prevMouseY   = -1;
+let isPressed    = false; // 是否按住左键 / 触摸中
+let isShift      = false; // 是否按住 Shift（和弦模式）
+let isTwoFinger  = false; // 移动端双指（和弦模式）
+let currentMidi  = -1;    // 当前吸附到的 MIDI 音符
+let lastMoveTime = 0;     // 上次移动时间戳（毫秒）
+let silenceTimer = null;  // 停音定时器
+
+/** 当前鼠标速度（用于音量计算） */
+let mouseSpeed   = 0;
+
+// ─────────────────────────────────────────────
+// 音符名称 UI 显示
+// ─────────────────────────────────────────────
+
+const noteDisplay   = document.getElementById('note-display');
+let   noteDisplayAlpha = 0;       // 当前显示的 alpha（0~1）
+let   noteDisplayTarget = 0;      // 目标 alpha
+let   noteDisplayTimer = null;    // 淡出定时器
+
+/** 显示音符名称，带颜色 */
+function showNoteDisplay(midi) {
+  const name  = midiToName(midi);
+  const color = midiToColor(midi);
+  noteDisplay.textContent = name;
+  noteDisplay.style.color = color;
+  noteDisplayTarget = 1;
+  // 清除旧的淡出计时
+  if (noteDisplayTimer) clearTimeout(noteDisplayTimer);
+  noteDisplayTimer = setTimeout(() => {
+    noteDisplayTarget = 0;
+  }, 1200);
+}
+
+/** 淡出音符名称 */
+function hideNoteDisplay() {
+  noteDisplayTarget = 0;
+}
+
+// ─────────────────────────────────────────────
+// 坐标 → MIDI 计算
+// ─────────────────────────────────────────────
+
+/** 将 X 坐标映射到 MIDI 音符（吸附到最近半音） */
+function xToMidi(x) {
+  const t = Math.max(0, Math.min(1, x / W));
+  const semitone = Math.round(t * SEMITONE_COUNT);
+  return MIDI_MIN + semitone;
+}
+
+/** 将 Y 坐标映射到 [0,1]（音色比例） */
+function yToRatio(y) {
+  return Math.max(0, Math.min(1, y / H));
+}
+
+// ─────────────────────────────────────────────
+// 音量计算（基于鼠标速度）
+// ─────────────────────────────────────────────
+
+const VOL_MIN  = 0.08;
+const VOL_MAX  = 0.45;
+const SPEED_MAX = 600; // px/s，超出后音量封顶
+
+function speedToVolume(speed) {
+  // 速度越快音量越大，使用对数曲线
+  const t = Math.min(1, speed / SPEED_MAX);
+  return VOL_MIN + (VOL_MAX - VOL_MIN) * Math.sqrt(t);
+}
+
+// ─────────────────────────────────────────────
+// 核心：处理鼠标/触摸位置更新
+// ─────────────────────────────────────────────
+
+let lastTimestamp = 0;
+
+function handleMove(x, y, timestamp, chordMode) {
+  ensureAudio();
+
+  // 计算速度（px/s）
+  if (prevMouseX >= 0) {
+    const dt = Math.max(1, timestamp - lastTimestamp) / 1000;
+    const dx = x - prevMouseX;
+    const dy = y - prevMouseY;
+    mouseSpeed = Math.sqrt(dx * dx + dy * dy) / dt;
+  }
+
+  prevMouseX    = mouseX;
+  prevMouseY    = mouseY;
+  mouseX        = x;
+  mouseY        = y;
+  lastTimestamp = timestamp;
+  lastMoveTime  = timestamp;
+
+  // 清除停音计时器
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+    silenceTimer = null;
+  }
+
+  // 计算当前 MIDI
+  const midi    = xToMidi(x);
+  const yRatio  = yToRatio(y);
+  const volume  = speedToVolume(mouseSpeed);
+
+  // 音符发生变化 → 切换音符（咔哒感）
+  if (midi !== currentMidi) {
+    stopAllVoices(0.02); // 极短淡出，产生切换感
+    currentMidi = midi;
+
+    // 发出音符（普通模式 or 和弦模式）
+    const midiList = chordMode
+      ? CHORD_INTERVALS.map(i => midi + i).filter(m => m <= 127)
+      : [midi];
+
+    midiList.forEach(m => {
+      const voice = createVoice(m, yRatio, volume);
+      if (voice) voices.set(m, voice);
+    });
+
+    showNoteDisplay(midi);
+  } else {
+    // 同一音符：实时更新音量（鼠标速度变化）
+    voices.forEach(voice => {
+      if (audioCtx && voice.gainNode) {
+        const now = audioCtx.currentTime;
+        voice.gainNode.gain.cancelScheduledValues(now);
+        voice.gainNode.gain.setValueAtTime(voice.gainNode.gain.value, now);
+        voice.gainNode.gain.linearRampToValueAtTime(volume, now + 0.05);
+      }
+    });
+  }
+
+  // 按住时记录轨迹点
+  if (isPressed && currentTrail) {
+    currentTrail.points.push({ x, y, midi, color: midiToColor(midi) });
+  }
+
+  // 1秒无移动后自动停音
+  silenceTimer = setTimeout(() => {
+    stopAllVoices(0.3);
+    hideNoteDisplay();
+    currentMidi = -1;
+  }, 1000);
+}
+
+// ─────────────────────────────────────────────
+// 鼠标事件
+// ─────────────────────────────────────────────
+
+document.addEventListener('mousemove', e => {
+  const chordMode = e.shiftKey || isShift;
+  handleMove(e.clientX, e.clientY, performance.now(), chordMode);
+  isShift = e.shiftKey;
+});
+
+document.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  ensureAudio();
+  isPressed     = true;
+  currentTrail  = newTrail();
+  trails.push(currentTrail);
+  // 立即记录当前点
+  if (mouseX >= 0) {
+    currentTrail.points.push({
+      x: mouseX, y: mouseY,
+      midi: currentMidi,
+      color: midiToColor(currentMidi)
+    });
+  }
+});
+
+document.addEventListener('mouseup', e => {
+  if (e.button !== 0) return;
+  isPressed = false;
+  if (currentTrail) {
+    currentTrail.active = false; // 标记为非活跃，开始淡出
+    currentTrail = null;
+  }
+  stopAllVoices(0.2);
+  hideNoteDisplay();
+  currentMidi = -1;
+});
+
+// ─────────────────────────────────────────────
+// 键盘事件
+// ─────────────────────────────────────────────
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    // 清除所有轨迹
+    trails.length = 0;
+    currentTrail  = null;
+  }
+  if (e.key === 'Shift') isShift = true;
+});
+
+document.addEventListener('keyup', e => {
+  if (e.key === 'Shift') isShift = false;
+});
+
+// ─────────────────────────────────────────────
+// 触摸事件（移动端支持）
+// ─────────────────────────────────────────────
+
+document.addEventListener('touchstart', e => {
+  e.preventDefault();
+  ensureAudio();
+  isPressed    = true;
+  isTwoFinger  = e.touches.length >= 2;
+  currentTrail = newTrail();
+  trails.push(currentTrail);
+  const t = e.touches[0];
+  handleMove(t.clientX, t.clientY, performance.now(), isTwoFinger);
+}, { passive: false });
+
+document.addEventListener('touchmove', e => {
+  e.preventDefault();
+  isTwoFinger = e.touches.length >= 2;
+  const t = e.touches[0];
+  handleMove(t.clientX, t.clientY, performance.now(), isTwoFinger);
+}, { passive: false });
+
+document.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (e.touches.length === 0) {
+    isPressed    = false;
+    isTwoFinger  = false;
+    if (currentTrail) {
+      currentTrail.active = false;
+      currentTrail = null;
+    }
+    stopAllVoices(0.2);
+    hideNoteDisplay();
+    currentMidi = -1;
+  }
+}, { passive: false });
+
+// ─────────────────────────────────────────────
+// 渲染循环（requestAnimationFrame）
+// ─────────────────────────────────────────────
+
+const TRAIL_FADE_SPEED = 0.008; // 每帧衰减量（约 120 帧/秒时 1.5s 淡出）
+
+function render() {
+  requestAnimationFrame(render);
+
+  // 清除画布（全黑背景）
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // 绘制网格背景
+  if (gridCanvas) {
+    ctx.drawImage(gridCanvas, 0, 0);
+  }
+
+  // 更新并绘制轨迹
+  for (let i = trails.length - 1; i >= 0; i--) {
+    const trail = trails[i];
+
+    // 非活跃轨迹逐渐淡出
+    if (!trail.active) {
+      trail.alpha -= TRAIL_FADE_SPEED;
+      if (trail.alpha <= 0) {
+        trails.splice(i, 1);
+        continue;
+      }
+    }
+
+    // 绘制轨迹线段
+    drawTrail(trail);
+  }
+
+  // 绘制当前鼠标位置的发光圆点
+  if (mouseX >= 0 && mouseY >= 0) {
+    drawCursor(mouseX, mouseY, currentMidi);
+  }
+
+  // 更新音符名称 UI 的 alpha（平滑过渡）
+  noteDisplayAlpha += (noteDisplayTarget - noteDisplayAlpha) * 0.12;
+  noteDisplay.style.opacity = noteDisplayAlpha.toFixed(3);
+}
+
+/** 绘制彩色发光轨迹 */
+function drawTrail(trail) {
+  const pts = trail.points;
+  if (pts.length < 2) return;
+
+  ctx.save();
+  ctx.globalAlpha = trail.alpha;
+
+  for (let i = 1; i < pts.length; i++) {
+    const p0 = pts[i - 1];
+    const p1 = pts[i];
+
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p1.x, p1.y);
+
+    // 渐变色（从 p0 到 p1 的颜色过渡）
+    const grad = ctx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
+    grad.addColorStop(0, p0.color);
+    grad.addColorStop(1, p1.color);
+    ctx.strokeStyle = grad;
+
+    // 发光效果
+    ctx.shadowColor  = p1.color;
+    ctx.shadowBlur   = 12;
+    ctx.lineWidth    = 2.5;
+    ctx.lineCap      = 'round';
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+/** 绘制鼠标位置发光圆点 */
+function drawCursor(x, y, midi) {
+  if (midi < 0) return;
+  const color = midiToColor(midi);
+
+  ctx.save();
+
+  // 外层光晕
+  const radius = isPressed ? 14 : 10;
+  const glow   = ctx.createRadialGradient(x, y, 0, x, y, radius * 2.5);
+  glow.addColorStop(0, color.replace('hsl', 'hsla').replace(')', ', 0.4)'));
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = glow;
+  ctx.fill();
+
+  // 核心亮点
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = 20;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────
+// 欢迎动画（2.2秒后移除遮罩）
+// ─────────────────────────────────────────────
+
+function initWelcome() {
+  const welcome = document.getElementById('welcome');
+  setTimeout(() => {
+    welcome.style.transition = 'opacity 0.5s ease';
+    welcome.style.opacity    = '0';
+    setTimeout(() => welcome.remove(), 500);
+  }, 2000);
+}
+
+// ─────────────────────────────────────────────
+// 启动
+// ─────────────────────────────────────────────
+
+resize();
+render();
+initWelcome();
+
+</script>
+</body>
+</html>
